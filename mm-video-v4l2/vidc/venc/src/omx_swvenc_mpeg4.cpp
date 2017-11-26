@@ -1,5 +1,5 @@
 /*--------------------------------------------------------------------------
-Copyright (c) 2014-2015, The Linux Foundation. All rights reserved.
+Copyright (c) 2014-2017, The Linux Foundation. All rights reserved.
 
 Redistribution and use in source and binary forms, with or without
 modification, are permitted provided that the following conditions are met:
@@ -51,7 +51,7 @@ ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #define RETURN(x)    EXIT_FUNC(); return x;
 #define ALIGN(value,alignment) (((value) + (alignment-1)) & (~(alignment-1)))
 
-#define BUFFER_LOG_LOC "/data/misc/media"
+#define BUFFER_LOG_LOC "/data/vendor/media"
 
 /* factory function executed by the core to create instances */
 void *get_omx_component_factory_fn(void)
@@ -68,20 +68,20 @@ omx_venc::omx_venc()
     memset(&m_debug,0,sizeof(m_debug));
 
     property_value[0] = '\0';
-    property_get("vidc.debug.level", property_value, "1");
+    property_get("vendor.vidc.debug.level", property_value, "1");
     debug_level = atoi(property_value);
 
     property_value[0] = '\0';
-    property_get("vidc.enc.log.in", property_value, "0");
+    property_get("vendor.vidc.enc.log.in", property_value, "0");
     m_debug.in_buffer_log = atoi(property_value);
 
     property_value[0] = '\0';
-    property_get("vidc.enc.log.out", property_value, "0");
+    property_get("vendor.vidc.enc.log.out", property_value, "0");
     m_debug.out_buffer_log = atoi(property_value);
 
     snprintf(m_debug.log_loc, PROPERTY_VALUE_MAX, "%s", BUFFER_LOG_LOC);
     property_value[0] = '\0';
-    property_get("vidc.log.loc", property_value, "");
+    property_get("vendor.vidc.log.loc", property_value, "");
     if (*property_value)
     {
        strlcpy(m_debug.log_loc, property_value, PROPERTY_VALUE_MAX);
@@ -95,6 +95,7 @@ omx_venc::omx_venc()
     mUseProxyColorFormat = false;
     get_syntaxhdr_enable = false;
     m_bSeqHdrRequested = false;
+    set_format = false;
 
     EXIT_FUNC();
 }
@@ -410,8 +411,8 @@ OMX_ERRORTYPE omx_venc::component_init(OMX_STRING role)
     m_state                   = OMX_StateLoaded;
     m_sExtraData = 0;
 
-    m_capability.max_height = OMX_CORE_WVGA_HEIGHT;
-    m_capability.max_width = OMX_CORE_WVGA_WIDTH;
+    m_capability.max_height = OMX_CORE_FWVGA_HEIGHT;
+    m_capability.max_width = OMX_CORE_FWVGA_WIDTH;
     m_capability.min_height = 32;
     m_capability.min_width = 32;
 
@@ -686,15 +687,18 @@ OMX_ERRORTYPE  omx_venc::set_parameter
                 (OMX_VIDEO_PARAM_PORTFORMATTYPE *)paramData;
             DEBUG_PRINT_LOW("set_parameter: OMX_IndexParamVideoPortFormat %d",
                     portFmt->eColorFormat);
+            SWVENC_COLOR_FORMAT color_format;
 
             /* set the driver with the corresponding values */
             if (PORT_INDEX_IN == portFmt->nPortIndex)
             {
-                if (portFmt->eColorFormat == (OMX_COLOR_FORMATTYPE)QOMX_COLOR_FormatAndroidOpaque)
+                if (portFmt->eColorFormat ==
+                    ((OMX_COLOR_FORMATTYPE) QOMX_COLOR_FormatAndroidOpaque))
                 {
                     /* meta_mode = 2 (kMetadataBufferTypeGrallocSource) */
-                    m_sInPortFormat.eColorFormat = (OMX_COLOR_FORMATTYPE)
-                            QOMX_COLOR_FORMATYUV420PackedSemiPlanar32m;
+                    m_sInPortFormat.eColorFormat =
+                        (OMX_COLOR_FORMATTYPE) QOMX_COLOR_FORMATYUV420PackedSemiPlanar32m;
+                    color_format = SWVENC_COLOR_FORMAT_NV12;
                     if (!mUseProxyColorFormat)
                     {
                        if (!c2d_conv.init())
@@ -710,15 +714,31 @@ OMX_ERRORTYPE  omx_venc::set_parameter
                 else
                 {
                     m_sInPortFormat.eColorFormat = portFmt->eColorFormat;
+                    if ((portFmt->eColorFormat == OMX_COLOR_FormatYUV420SemiPlanar) ||
+                        (portFmt->eColorFormat ==
+                         ((OMX_COLOR_FORMATTYPE) QOMX_COLOR_FORMATYUV420PackedSemiPlanar32m)))
+                    {
+                        color_format = SWVENC_COLOR_FORMAT_NV12;
+                    }
+                    else if (portFmt->eColorFormat ==
+                             ((OMX_COLOR_FORMATTYPE) QOMX_COLOR_FormatYVU420SemiPlanar))
+                    {
+                        color_format = SWVENC_COLOR_FORMAT_NV21;
+                    }
+                    else
+                    {
+                        DEBUG_PRINT_ERROR("%s: OMX_IndexParamVideoPortFormat %d invalid",
+                                          __FUNCTION__,
+                                          portFmt->eColorFormat);
+                        RETURN(OMX_ErrorBadParameter);
+                    }
                     m_input_msg_id = OMX_COMPONENT_GENERATE_ETB;
                     mUseProxyColorFormat = false;
                 }
-                DEBUG_PRINT_LOW("set_parameter: OMX_IndexParamVideoPortFormat %d",
-                      portFmt->eColorFormat);
-
+                m_sInPortDef.format.video.eColorFormat = m_sInPortFormat.eColorFormat;
                 /* set the input color format */
                 Prop.id = SWVENC_PROPERTY_ID_COLOR_FORMAT;
-                Prop.info.color_format = SWVENC_COLOR_FORMAT_NV12;
+                Prop.info.color_format = color_format;
                 Ret = swvenc_setproperty(m_hSwVenc, &Prop);
                 if (Ret != SWVENC_S_SUCCESS)
                 {
@@ -1579,6 +1599,7 @@ OMX_ERRORTYPE  omx_venc::set_config
         }
         default:
             DEBUG_PRINT_ERROR("ERROR: unsupported index %d", (int) configIndex);
+            RETURN(OMX_ErrorUnsupportedSetting);
             break;
     }
 
@@ -1634,9 +1655,6 @@ OMX_ERRORTYPE  omx_venc::component_deinit(OMX_IN OMX_HANDLETYPE hComp)
     m_etb_q.m_read = m_etb_q.m_write =0;
 
     /* Clear the strong reference */
-    DEBUG_PRINT_HIGH("Calling m_heap_ptr.clear()");
-    m_heap_ptr.clear();
-
     DEBUG_PRINT_HIGH("Calling swvenc_deinit()");
     swvenc_deinit(m_hSwVenc);
 
@@ -1660,7 +1678,7 @@ OMX_U32 omx_venc::dev_stop(void)
             __FUNCTION__, Ret);
           RETURN(-1);
        }
-
+       set_format = false;
        m_stopped = true;
 
        /* post STOP_DONE event as start is synchronus */
@@ -1740,6 +1758,24 @@ OMX_U32 omx_venc::dev_set_message_thread_id(pthread_t tid)
     RETURN(true);
 }
 
+OMX_U32 omx_venc::dev_handle_empty_eos_buffer(void)
+{
+    ENTER_FUNC();
+    SWVENC_STATUS Ret;
+    SWVENC_IPBUFFER ipbuffer;
+    ipbuffer.p_buffer = NULL;
+    ipbuffer.filled_length = 0;
+    ipbuffer.flags |= SWVENC_FLAG_EOS;
+    Ret = swvenc_emptythisbuffer(m_hSwVenc, &ipbuffer);
+    if (Ret != SWVENC_S_SUCCESS)
+    {
+        DEBUG_PRINT_ERROR("%s, swvenc_emptythisbuffer failed (%d)",
+                __FUNCTION__, Ret);
+        RETURN(2);
+    }
+    RETURN(0);
+}
+
 bool omx_venc::dev_use_buf(void *buf_addr,unsigned port,unsigned index)
 {
     ENTER_FUNC();
@@ -1775,36 +1811,112 @@ bool omx_venc::dev_empty_buf
     SWVENC_IPBUFFER ipbuffer;
     OMX_BUFFERHEADERTYPE *bufhdr = (OMX_BUFFERHEADERTYPE *)buffer;
     unsigned int size = 0, filled_length, offset = 0;
+    SWVENC_COLOR_FORMAT color_format;
+    SWVENC_PROPERTY prop;
 
     (void)pmem_data_buf;
     (void)index;
 
     if (meta_mode_enable)
     {
-       encoder_media_buffer_type *meta_buf = NULL;
-       meta_buf = (encoder_media_buffer_type *)bufhdr->pBuffer;
-       if (meta_buf)
-       {
-          if (meta_buf->buffer_type == kMetadataBufferTypeCameraSource)
-          {
-              offset = meta_buf->meta_handle->data[1];
-              size = meta_buf->meta_handle->data[2];
-          }
-          else if (meta_buf->buffer_type == kMetadataBufferTypeGrallocSource)
-          {
-              private_handle_t *handle = (private_handle_t *)meta_buf->meta_handle;
-              size = handle->size;
-          }
-       }
-       ipbuffer.p_buffer = (unsigned char *)mmap(NULL, size, PROT_READ|PROT_WRITE,MAP_SHARED, fd, offset);
-       ipbuffer.size = size;
-       ipbuffer.filled_length = size;
+        LEGACY_CAM_METADATA_TYPE *meta_buf = NULL;
+        meta_buf = (LEGACY_CAM_METADATA_TYPE *)bufhdr->pBuffer;
+        if(m_sInPortDef.format.video.eColorFormat == ((OMX_COLOR_FORMATTYPE) QOMX_COLOR_FormatAndroidOpaque))
+        {
+            DEBUG_PRINT_LOW("dev_empty_buf: color_format is QOMX_COLOR_FormatAndroidOpaque");
+            set_format = true;
+        }
+        if(!meta_buf)
+        {
+            if (!bufhdr->nFilledLen && (bufhdr->nFlags & OMX_BUFFERFLAG_EOS))
+            {
+                ipbuffer.p_buffer= bufhdr->pBuffer;
+                ipbuffer.size = bufhdr->nAllocLen;
+                ipbuffer.filled_length = bufhdr->nFilledLen;
+                DEBUG_PRINT_LOW("dev_empty_buf: empty EOS buffer");
+            }
+            else
+            {
+                return false;
+            }
+        }
+        else
+        {
+            if (meta_buf->buffer_type == LEGACY_CAM_SOURCE)
+            {
+                offset = meta_buf->meta_handle->data[1];
+                size = meta_buf->meta_handle->data[2];
+                if (set_format && (meta_buf->meta_handle->numFds + meta_buf->meta_handle->numInts > 5))
+                {
+                    m_sInPortFormat.eColorFormat = (OMX_COLOR_FORMATTYPE)meta_buf->meta_handle->data[5];
+                }
+                ipbuffer.p_buffer = (unsigned char *)mmap(NULL, size, PROT_READ|PROT_WRITE,MAP_SHARED, fd, offset);
+                if (ipbuffer.p_buffer == MAP_FAILED)
+                {
+                    DEBUG_PRINT_ERROR("mmap() failed for fd %d of size %d",fd,size);
+                    RETURN(OMX_ErrorBadParameter);
+                }
+                ipbuffer.size = size;
+                ipbuffer.filled_length = size;
+            }
+            else if (meta_buf->buffer_type == kMetadataBufferTypeGrallocSource)
+            {
+                VideoGrallocMetadata *meta_buf = (VideoGrallocMetadata *)bufhdr->pBuffer;
+                private_handle_t *handle = (private_handle_t *)meta_buf->pHandle;
+                size = handle->size;
+                if(set_format)
+                {
+                    DEBUG_PRINT_LOW("color format = 0x%x",handle->format);
+                    if (((OMX_COLOR_FORMATTYPE)handle->format) != m_sInPortFormat.eColorFormat)
+                    {
+                        if(handle->format == HAL_PIXEL_FORMAT_NV12_ENCODEABLE)
+                        {
+                            m_sInPortFormat.eColorFormat = (OMX_COLOR_FORMATTYPE)
+                                QOMX_COLOR_FORMATYUV420PackedSemiPlanar32m;
+                        }
+                        else
+                        {
+                            DEBUG_PRINT_ERROR("%s: OMX_IndexParamVideoPortFormat 0x%x invalid",
+                                              __FUNCTION__,handle->format);
+                            RETURN(OMX_ErrorBadParameter);
+                        }
+                    }
+                }
+                ipbuffer.p_buffer = (unsigned char *)mmap(NULL, size, PROT_READ|PROT_WRITE,MAP_SHARED, fd, offset);
+                if (ipbuffer.p_buffer == MAP_FAILED)
+                {
+                    DEBUG_PRINT_ERROR("mmap() failed for fd %d of size %d",fd,size);
+                    RETURN(OMX_ErrorBadParameter);
+                }
+                ipbuffer.size = size;
+                ipbuffer.filled_length = size;
+            }
+            else
+            {
+                //handles the use case for surface encode
+                ipbuffer.p_buffer = bufhdr->pBuffer;
+                ipbuffer.size = bufhdr->nAllocLen;
+                ipbuffer.filled_length = bufhdr->nFilledLen;
+            }
+            if (set_format)
+            {
+                set_format = false;
+                m_sInPortDef.format.video.eColorFormat = m_sInPortFormat.eColorFormat;
+                Ret = swvenc_set_color_format(m_sInPortFormat.eColorFormat);
+                if (Ret != SWVENC_S_SUCCESS)
+                {
+                    DEBUG_PRINT_ERROR("%s, swvenc_setproperty failed (%d)",
+                        __FUNCTION__, Ret);
+                    RETURN(OMX_ErrorUnsupportedSetting);
+                }
+            }
+        }
     }
     else
     {
-       ipbuffer.p_buffer = bufhdr->pBuffer;
-       ipbuffer.size = bufhdr->nAllocLen;
-       ipbuffer.filled_length = bufhdr->nFilledLen;
+        ipbuffer.p_buffer = bufhdr->pBuffer;
+        ipbuffer.size = bufhdr->nAllocLen;
+        ipbuffer.filled_length = bufhdr->nFilledLen;
     }
     ipbuffer.flags = 0;
     if (bufhdr->nFlags & OMX_BUFFERFLAG_EOS)
@@ -1861,20 +1973,17 @@ bool omx_venc::dev_fill_buf
     opbuffer.size = bufhdr->nAllocLen;
     opbuffer.filled_length = bufhdr->nFilledLen;
     opbuffer.flags = bufhdr->nFlags;
-    opbuffer.extradata_type = SWVENC_EXTRADATA_TYPE_NONE;
-    opbuffer.p_extradata = NULL;
+    opbuffer.timestamp = bufhdr->nTimeStamp;
     opbuffer.p_client_data = (unsigned char *)bufhdr;
+    opbuffer.frame_type = SWVENC_FRAME_TYPE_I;
 
-    DEBUG_PRINT_LOW("FTB: p_buffer (%p) size (%d) filled_len (%d) flags (0x%X) timestamp (%lld) clientData (0x%X)",
+    DEBUG_PRINT_LOW("FTB: p_buffer (%p) size (%d) filled_len (%d) flags (0x%X) timestamp (%lld) clientData (%p)",
       opbuffer.p_buffer,
       opbuffer.size,
       opbuffer.filled_length,
       opbuffer.flags,
       opbuffer.timestamp,
-      (unsigned int)opbuffer.p_client_data);
-    DEBUG_PRINT_LOW("FTB: extradata_type (%d) p_extradata (%p)",
-      opbuffer.extradata_type,
-      opbuffer.p_extradata);
+      opbuffer.p_client_data);
 
     if ( false == m_bSeqHdrRequested)
     {
@@ -1975,6 +2084,16 @@ bool omx_venc::dev_get_vui_timing_info(OMX_U32 *enabled)
     RETURN(false);
 }
 
+bool omx_venc::dev_get_vqzip_sei_info(OMX_U32 *enabled)
+{
+    ENTER_FUNC();
+
+    (void)enabled;
+    DEBUG_PRINT_ERROR("Get vqzip sei info is not supported");
+
+    RETURN(false);
+}
+
 bool omx_venc::dev_get_peak_bitrate(OMX_U32 *peakbitrate)
 {
     //TBD: store the peak bitrate in class and return here;
@@ -1982,6 +2101,17 @@ bool omx_venc::dev_get_peak_bitrate(OMX_U32 *peakbitrate)
 
     (void)peakbitrate;
     DEBUG_PRINT_ERROR("Get peak bitrate is not supported");
+
+    RETURN(false);
+}
+
+bool omx_venc::dev_get_batch_size(OMX_U32 *size)
+{
+    ENTER_FUNC();
+
+    (void)size;
+
+    DEBUG_PRINT_ERROR("Get batch size is not supported");
 
     RETURN(false);
 }
@@ -2110,15 +2240,39 @@ bool omx_venc::dev_is_video_session_supported(OMX_U32 width, OMX_U32 height)
    RETURN(true);
 }
 
-int omx_venc::dev_handle_extradata(void *buffer, int index)
+bool omx_venc::dev_buffer_ready_to_queue(OMX_BUFFERHEADERTYPE *buffer)
 {
    ENTER_FUNC();
 
    (void)buffer;
+   RETURN(true);
+}
+int omx_venc::dev_handle_output_extradata(void *buffer, int fd)
+{
+   ENTER_FUNC();
+
+   (void)buffer;
+   (void)fd;
+
+   RETURN(true);
+}
+
+int omx_venc::dev_handle_input_extradata(void *buffer, int fd, int index)
+{
+   ENTER_FUNC();
+
+   (void)buffer;
+   (void)fd;
    (void)index;
 
    RETURN(true);
-    //return handle->handle_extradata(buffer, index);
+}
+
+void omx_venc::dev_set_extradata_cookie(void *buffer)
+{
+   ENTER_FUNC();
+
+   (void)buffer;
 }
 
 int omx_venc::dev_set_format(int color)
@@ -2131,21 +2285,27 @@ int omx_venc::dev_set_format(int color)
     //return handle->venc_set_format(color);
 }
 
+bool omx_venc::dev_get_dimensions(OMX_U32 index, OMX_U32 *width, OMX_U32 *height)
+{
+   ENTER_FUNC();
+
+   (void)index;
+   (void)width;
+   (void)height;
+
+   RETURN(true);
+}
+
 bool omx_venc::dev_color_align(OMX_BUFFERHEADERTYPE *buffer,
                 OMX_U32 width, OMX_U32 height)
 {
     ENTER_FUNC();
 
-    (void)buffer;
-    (void)width;
-    (void)height;
     if(secure_session) {
         DEBUG_PRINT_ERROR("Cannot align colors in secure session.");
         RETURN(OMX_FALSE);
     }
-
-    RETURN(true);
-    //return handle->venc_color_align(buffer, width,height);
+    return swvenc_color_align(buffer, width,height);
 }
 
 bool omx_venc::is_secure_session()
@@ -2162,8 +2322,9 @@ bool omx_venc::dev_get_output_log_flag()
     RETURN(m_debug.out_buffer_log == 1);
 }
 
-int omx_venc::dev_output_log_buffers(const char *buffer, int bufferlen)
+int omx_venc::dev_output_log_buffers(const char *buffer, int bufferlen, uint64_t ts)
 {
+    (void) ts;
     ENTER_FUNC();
 
     if (m_debug.out_buffer_log && !m_debug.outfile)
@@ -2245,6 +2406,7 @@ int omx_venc::swvenc_input_log_buffers(const char *buffer, int bufferlen)
           fwrite(temp, width, 1, m_debug.infile);
           temp += stride;
        }
+       temp = (char*)(buffer + (stride * scanlines));
        for(int i = 0; i < height/2; i++)
        {
           fwrite(temp, width, 1, m_debug.infile);
@@ -2366,18 +2528,19 @@ SWVENC_STATUS omx_venc::swvenc_empty_buffer_done
 #ifdef _ANDROID_ICS_
         if (meta_mode_enable)
         {
-           encoder_media_buffer_type *meta_buf = NULL;
+           LEGACY_CAM_METADATA_TYPE *meta_buf = NULL;
            unsigned int size = 0;
-           meta_buf = (encoder_media_buffer_type *)omxhdr->pBuffer;
+           meta_buf = (LEGACY_CAM_METADATA_TYPE *)omxhdr->pBuffer;
            if (meta_buf)
            {
-              if (meta_buf->buffer_type == kMetadataBufferTypeCameraSource)
+              if (meta_buf->buffer_type == LEGACY_CAM_SOURCE)
               {
                   size = meta_buf->meta_handle->data[2];
               }
               else if (meta_buf->buffer_type == kMetadataBufferTypeGrallocSource)
               {
-                  private_handle_t *handle = (private_handle_t *)meta_buf->meta_handle;
+                  VideoGrallocMetadata *meta_buf = (VideoGrallocMetadata *)omxhdr->pBuffer;
+                  private_handle_t *handle = (private_handle_t *)meta_buf->pHandle;
                   size = handle->size;
               }
            }
@@ -2836,4 +2999,78 @@ SWVENC_STATUS omx_venc::swvenc_set_intra_period
    }
 
    RETURN(Ret);
+}
+
+bool omx_venc::swvenc_color_align(OMX_BUFFERHEADERTYPE *buffer, OMX_U32 width,
+                        OMX_U32 height)
+{
+     OMX_U32 y_stride = VENUS_Y_STRIDE(COLOR_FMT_NV12, width),
+            y_scanlines = VENUS_Y_SCANLINES(COLOR_FMT_NV12, height),
+            uv_stride = VENUS_UV_STRIDE(COLOR_FMT_NV12, width),
+            uv_scanlines = VENUS_UV_SCANLINES(COLOR_FMT_NV12, height),
+            src_chroma_offset = width * height;
+
+    if (buffer->nAllocLen >= VENUS_BUFFER_SIZE(COLOR_FMT_NV12, width, height)) {
+        OMX_U8* src_buf = buffer->pBuffer, *dst_buf = buffer->pBuffer;
+        //Do chroma first, so that we can convert it in-place
+        src_buf += width * height;
+        dst_buf += y_stride * y_scanlines;
+        for (int line = height / 2 - 1; line >= 0; --line) {
+            memmove(dst_buf + line * uv_stride,
+                    src_buf + line * width,
+                    width);
+        }
+
+        dst_buf = src_buf = buffer->pBuffer;
+        //Copy the Y next
+        for (int line = height - 1; line > 0; --line) {
+            memmove(dst_buf + line * y_stride,
+                    src_buf + line * width,
+                    width);
+        }
+    } else {
+        DEBUG_PRINT_ERROR("Failed to align Chroma. from %u to %u : \
+                Insufficient bufferLen=%u v/s Required=%u",
+                (unsigned int)(width*height), (unsigned int)src_chroma_offset, (unsigned int)buffer->nAllocLen,
+                VENUS_BUFFER_SIZE(COLOR_FMT_NV12, width, height));
+        return false;
+    }
+
+    return true;
+}
+
+SWVENC_STATUS omx_venc::swvenc_set_color_format
+(
+   OMX_COLOR_FORMATTYPE color_format
+)
+{
+    ENTER_FUNC();
+    SWVENC_STATUS Ret = SWVENC_S_SUCCESS;
+    SWVENC_COLOR_FORMAT swvenc_color_format;
+    SWVENC_PROPERTY Prop;
+    if ((color_format == OMX_COLOR_FormatYUV420SemiPlanar) ||
+         (color_format == ((OMX_COLOR_FORMATTYPE) QOMX_COLOR_FORMATYUV420PackedSemiPlanar32m)))
+    {
+        swvenc_color_format = SWVENC_COLOR_FORMAT_NV12;
+    }
+    else if (color_format == ((OMX_COLOR_FORMATTYPE) QOMX_COLOR_FormatYVU420SemiPlanar))
+    {
+        swvenc_color_format = SWVENC_COLOR_FORMAT_NV21;
+    }
+    else
+    {
+        DEBUG_PRINT_ERROR("%s: color_format %d invalid",__FUNCTION__,color_format);
+        RETURN(SWVENC_S_FAILURE);
+    }
+    /* set the input color format */
+    Prop.id = SWVENC_PROPERTY_ID_COLOR_FORMAT;
+    Prop.info.color_format = swvenc_color_format;
+    Ret = swvenc_setproperty(m_hSwVenc, &Prop);
+    if (Ret != SWVENC_S_SUCCESS)
+    {
+        DEBUG_PRINT_ERROR("%s, swvenc_setproperty failed (%d)",
+            __FUNCTION__, Ret);
+        Ret = SWVENC_S_FAILURE;
+    }
+    RETURN(Ret);
 }

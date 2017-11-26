@@ -1,5 +1,5 @@
 /*--------------------------------------------------------------------------
-Copyright (c) 2009, The Linux Foundation. All rights reserved.
+Copyright (c) 2009, 2015, 2017 The Linux Foundation. All rights reserved.
 
 Redistribution and use in source and binary forms, with or without
 modification, are permitted provided that the following conditions are met:
@@ -404,6 +404,7 @@ OMX_GetHandle(OMX_OUT OMX_HANDLETYPE*     handle,
   OMX_ERRORTYPE  eRet = OMX_ErrorNone;
   int cmp_index = -1;
   int hnd_index = -1;
+  int vpp_cmp_index = -1;
 
   DEBUG_PRINT("OMXCORE API :  GetHandle %p %s %p\n", handle,
                                                      componentName,
@@ -412,23 +413,61 @@ OMX_GetHandle(OMX_OUT OMX_HANDLETYPE*     handle,
   if(handle)
   {
     struct stat sd;
-
     *handle = NULL;
+    char optComponentName[OMX_MAX_STRINGNAME_SIZE];
+    strlcpy(optComponentName, componentName, OMX_MAX_STRINGNAME_SIZE);
 
-    cmp_index = get_cmp_index(componentName);
+    if(strstr(componentName, "avc") && strstr(componentName, "decoder"))
+    {
+      void *libhandle = dlopen("libOmxVideoDSMode.so", RTLD_NOW);
+      if(libhandle)
+      {
+        int (*fn_ptr)()  = dlsym(libhandle, "isDSModeActive");
 
+        if(fn_ptr == NULL)
+        {
+          DEBUG_PRINT_ERROR("Error: isDSModeActive Not Found %s\n",
+                    dlerror());
+        }
+        else
+        {
+          int isActive = fn_ptr();
+          char *pSubString = strstr(componentName, ".dsmode");
+          if(pSubString)
+          {
+            optComponentName[pSubString - componentName] = 0;
+          }
+          else if(isActive)
+          {
+            strlcat(optComponentName, ".dsmode", OMX_MAX_STRINGNAME_SIZE);
+          }
+          cmp_index = get_cmp_index(optComponentName);
+        }
+        dlclose(libhandle);
+      }
+      else
+      {
+        DEBUG_PRINT_ERROR("Failed to load dsmode library");
+      }
+    }
+
+    if(cmp_index < 0)
+    {
+      cmp_index = get_cmp_index(componentName);
+      strlcpy(optComponentName, componentName, OMX_MAX_STRINGNAME_SIZE);
+    }
     if(cmp_index >= 0)
     {
-       char value[PROPERTY_VALUE_MAX];
-       DEBUG_PRINT("getting fn pointer\n");
+      char value[PROPERTY_VALUE_MAX];
+      DEBUG_PRINT("getting fn pointer\n");
 
       // Load VPP omx component for decoder if vpp
       // property is enabled
-      if ((property_get("media.vpp.enable", value, NULL))
-          && (!strcmp("1", value) || !strcmp("true", value))) {
+      if ((property_get("vendor.media.vpp.enable", value, NULL))
+           && (!strcmp("1", value) || !strcmp("true", value))) {
         DEBUG_PRINT("VPP property is enabled");
         if (!strcmp(core[cmp_index].so_lib_name, "libOmxVdec.so")) {
-          int vpp_cmp_index = get_cmp_index("OMX.qcom.vdec.vpp");
+          vpp_cmp_index = get_cmp_index("OMX.qti.vdec.vpp");
           if (vpp_cmp_index < 0) {
             DEBUG_PRINT_ERROR("Unable to find VPP OMX lib in registry ");
           } else {
@@ -439,7 +478,7 @@ OMX_GetHandle(OMX_OUT OMX_HANDLETYPE*     handle,
       }
 
        // dynamically load the so
-       core[cmp_index].fn_ptr =
+      core[cmp_index].fn_ptr =
         omx_core_load_cmp_library(core[cmp_index].so_lib_name,
                                   &core[cmp_index].so_lib_handle);
 
@@ -449,6 +488,7 @@ OMX_GetHandle(OMX_OUT OMX_HANDLETYPE*     handle,
         //Do not allow more than MAX limit for DSP audio decoders
         if((!strcmp(core[cmp_index].so_lib_name,"libOmxWmaDec.so")  ||
             !strcmp(core[cmp_index].so_lib_name,"libOmxAacDec.so")  ||
+            !strcmp(core[cmp_index].so_lib_name,"libOmxG711Dec.so")  ||
             !strcmp(core[cmp_index].so_lib_name,"libOmxAlacDec.so") ||
             !strcmp(core[cmp_index].so_lib_name,"libOmxApeDec.so")) &&
             (number_of_adec_nt_session+1 > MAX_AUDIO_NT_SESSION)) {
@@ -463,7 +503,7 @@ OMX_GetHandle(OMX_OUT OMX_HANDLETYPE*     handle,
         {
           void *hComp = NULL;
           hComp = qc_omx_create_component_wrapper((OMX_PTR)pThis);
-          if((eRet = qc_omx_component_init(hComp, componentName)) !=
+          if((eRet = qc_omx_component_init(hComp, optComponentName)) !=
                            OMX_ErrorNone)
           {
               DEBUG_PRINT("Component not created succesfully\n");
@@ -472,7 +512,16 @@ OMX_GetHandle(OMX_OUT OMX_HANDLETYPE*     handle,
 
           }
           qc_omx_component_set_callbacks(hComp,callBacks,appData);
-          hnd_index = get_comp_handle_index(core[cmp_index].name);
+
+          if (vpp_cmp_index >= 0)
+          {
+            hnd_index = get_comp_handle_index("OMX.qti.vdec.vpp");
+          }
+          else
+          {
+            hnd_index = get_comp_handle_index(optComponentName);
+          }
+
           if(hnd_index >= 0)
           {
             core[cmp_index].inst[hnd_index]= *handle = (OMX_HANDLETYPE) hComp;
@@ -486,6 +535,7 @@ OMX_GetHandle(OMX_OUT OMX_HANDLETYPE*     handle,
           DEBUG_PRINT("Component %p Successfully created\n",*handle);
           if(!strcmp(core[cmp_index].so_lib_name,"libOmxWmaDec.so")  ||
              !strcmp(core[cmp_index].so_lib_name,"libOmxAacDec.so")  ||
+             !strcmp(core[cmp_index].so_lib_name,"libOmxG711Dec.so")  ||
              !strcmp(core[cmp_index].so_lib_name,"libOmxAlacDec.so") ||
              !strcmp(core[cmp_index].so_lib_name,"libOmxApeDec.so")) {
 
@@ -548,6 +598,7 @@ OMX_FreeHandle(OMX_IN OMX_HANDLETYPE hComp)
     if ((eRet = qc_omx_component_deinit(hComp)) == OMX_ErrorNone)
     {
         pthread_mutex_lock(&lock_core);
+        clear_cmp_handle(hComp);
         /* Unload component library */
     if( (i < (int)SIZE_OF_CORE) && core[i].so_lib_handle)
     {
@@ -573,7 +624,6 @@ OMX_FreeHandle(OMX_IN OMX_HANDLETYPE hComp)
                                    number_of_adec_nt_session);
            }
     }
-    clear_cmp_handle(hComp);
     pthread_mutex_unlock(&lock_core);
     }
     else
@@ -657,7 +707,7 @@ OMX_ComponentNameEnum(OMX_OUT OMX_STRING componentName,
   DEBUG_PRINT("OMXCORE API - OMX_ComponentNameEnum %p %d %d\n", componentName
                                                               ,(unsigned)nameLen
                                                               ,(unsigned)index);
-  if(index < SIZE_OF_CORE)
+  if((index < SIZE_OF_CORE) && strncmp(core[index].name, "OMX.QCOM.CUST.COMP.START",strlen("OMX.QCOM.CUST.COMP.START")))
   {
     #ifdef _ANDROID_
     strlcpy(componentName, core[index].name,nameLen);

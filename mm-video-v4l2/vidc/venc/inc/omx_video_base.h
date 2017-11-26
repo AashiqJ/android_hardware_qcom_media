@@ -1,5 +1,5 @@
 /*--------------------------------------------------------------------------
-Copyright (c) 2010-2015, The Linux Foundation. All rights reserved.
+Copyright (c) 2010-2017, The Linux Foundation. All rights reserved.
 
 Redistribution and use in source and binary forms, with or without
 modification, are permitted provided that the following conditions are
@@ -47,7 +47,6 @@ IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <stdio.h>
 #include <sys/mman.h>
 #ifdef _ANDROID_
-#include <binder/MemoryHeapBase.h>
 #ifdef _ANDROID_ICS_
 #include "QComOMXMetadata.h"
 #endif
@@ -58,6 +57,7 @@ IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <media/hardware/HardwareAPI.h>
 #include "OMX_Core.h"
 #include "OMX_QCOMExtns.h"
+#include "OMX_Skype_VideoExtensions.h"
 #include "OMX_VideoExt.h"
 #include "OMX_IndexExt.h"
 #include "qc_omx_component.h"
@@ -67,17 +67,11 @@ IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <dlfcn.h>
 #include "C2DColorConverter.h"
 #include "vidc_debug.h"
+#include <vector>
+#include "vidc_vendor_extensions.h"
 
 #ifdef _ANDROID_
 using namespace android;
-// local pmem heap object
-class VideoHeap : public MemoryHeapBase
-{
-    public:
-        VideoHeap(int fd, size_t size, void* base);
-        virtual ~VideoHeap() {}
-};
-
 #include <utils/Log.h>
 
 #endif // _ANDROID_
@@ -106,9 +100,11 @@ static const char* MEM_DEVICE = "/dev/pmem_smipool";
 //////////////////////////////////////////////////////////////////////////////
 //                       Module specific globals
 //////////////////////////////////////////////////////////////////////////////
-
-#define OMX_SPEC_VERSION  0x00000101
-
+#define OMX_SPEC_VERSION 0x00000101
+#define OMX_INIT_STRUCT(_s_, _name_)            \
+    memset((_s_), 0x0, sizeof(_name_));          \
+(_s_)->nSize = sizeof(_name_);               \
+(_s_)->nVersion.nVersion = OMX_SPEC_VERSION
 
 //////////////////////////////////////////////////////////////////////////////
 //               Macros
@@ -148,12 +144,25 @@ static const char* MEM_DEVICE = "/dev/pmem_smipool";
 #define LEGACY_CAM_METADATA_TYPE encoder_media_buffer_type
 #endif
 
-void* enc_message_thread(void *);
+void* message_thread_enc(void *);
+
+enum omx_venc_extradata_types {
+    VENC_EXTRADATA_SLICEINFO = 0x100,
+    VENC_EXTRADATA_MBINFO = 0x400,
+    VENC_EXTRADATA_FRAMEDIMENSION = 0x1000000,
+    VENC_EXTRADATA_YUV_STATS = 0x800,
+    VENC_EXTRADATA_VQZIP = 0x02000000,
+    VENC_EXTRADATA_ROI = 0x04000000,
+};
 
 struct output_metabuffer {
     OMX_U32 type;
     native_handle_t *nh;
 };
+
+typedef struct encoder_meta_buffer_payload_type {
+    char data[sizeof(LEGACY_CAM_METADATA_TYPE) + sizeof(int)];
+} encoder_meta_buffer_payload_type;
 
 // OMX video class
 class omx_video: public qc_omx_component
@@ -162,7 +171,7 @@ class omx_video: public qc_omx_component
 #ifdef _ANDROID_ICS_
         bool meta_mode_enable;
         bool c2d_opened;
-        LEGACY_CAM_METADATA_TYPE meta_buffers[MAX_NUM_INPUT_BUFFERS];
+        encoder_meta_buffer_payload_type meta_buffers[MAX_NUM_INPUT_BUFFERS];
         OMX_BUFFERHEADERTYPE *opaque_buffer_hdr[MAX_NUM_INPUT_BUFFERS];
         bool get_syntaxhdr_enable;
         OMX_BUFFERHEADERTYPE  *psource_frame;
@@ -179,8 +188,8 @@ class omx_video: public qc_omx_component
                 ~omx_c2d_conv();
                 bool init();
                 bool open(unsigned int height,unsigned int width,
-                        ColorConvertFormat src,
-                        ColorConvertFormat dest,unsigned int src_stride);
+                        ColorConvertFormat src, ColorConvertFormat dest,
+                        unsigned int src_stride, unsigned int flags);
                 bool convert(int src_fd, void *src_base, void *src_viraddr,
                         int dest_fd, void *dest_base, void *dest_viraddr);
                 bool get_buffer_size(int port,unsigned int &buf_size);
@@ -228,33 +237,39 @@ class omx_video: public qc_omx_component
         virtual OMX_U32 dev_resume(void) = 0;
         virtual OMX_U32 dev_start_done(void) = 0;
         virtual OMX_U32 dev_set_message_thread_id(pthread_t) = 0;
+        virtual OMX_U32 dev_handle_empty_eos_buffer(void) = 0;
         virtual bool dev_use_buf(void *,unsigned,unsigned) = 0;
         virtual bool dev_free_buf(void *,unsigned) = 0;
         virtual bool dev_empty_buf(void *, void *,unsigned,unsigned) = 0;
         virtual bool dev_fill_buf(void *buffer, void *,unsigned,unsigned) = 0;
         virtual bool dev_get_buf_req(OMX_U32 *,OMX_U32 *,OMX_U32 *,OMX_U32) = 0;
+        virtual bool dev_get_dimensions(OMX_U32 ,OMX_U32 *,OMX_U32 *) = 0;
         virtual bool dev_get_seq_hdr(void *, unsigned, unsigned *) = 0;
         virtual bool dev_loaded_start(void) = 0;
         virtual bool dev_loaded_stop(void) = 0;
         virtual bool dev_loaded_start_done(void) = 0;
         virtual bool dev_loaded_stop_done(void) = 0;
         virtual bool is_secure_session(void) = 0;
-#ifdef _MSM8974_
-        virtual int dev_handle_extradata(void*, int) = 0;
+        virtual int dev_handle_output_extradata(void*, int) = 0;
         virtual int dev_set_format(int) = 0;
-#endif
         virtual bool dev_is_video_session_supported(OMX_U32 width, OMX_U32 height) = 0;
         virtual bool dev_get_capability_ltrcount(OMX_U32 *, OMX_U32 *, OMX_U32 *) = 0;
         virtual bool dev_get_performance_level(OMX_U32 *) = 0;
         virtual bool dev_get_vui_timing_info(OMX_U32 *) = 0;
+        virtual bool dev_get_vqzip_sei_info(OMX_U32 *) = 0;
         virtual bool dev_get_peak_bitrate(OMX_U32 *) = 0;
+        virtual bool dev_get_batch_size(OMX_U32 *) = 0;
+        virtual bool dev_buffer_ready_to_queue(OMX_BUFFERHEADERTYPE *buffer) = 0;
+        virtual bool dev_get_temporal_layer_caps(OMX_U32 * /*nMaxLayers*/,
+                OMX_U32 * /*nMaxBLayers*/) = 0;
+        virtual bool dev_get_pq_status(OMX_BOOL *) = 0;
 #ifdef _ANDROID_ICS_
         void omx_release_meta_buffer(OMX_BUFFERHEADERTYPE *buffer);
 #endif
         virtual bool dev_color_align(OMX_BUFFERHEADERTYPE *buffer, OMX_U32 width,
                         OMX_U32 height) = 0;
         virtual bool dev_get_output_log_flag() = 0;
-        virtual int dev_output_log_buffers(const char *buffer_addr, int buffer_len) = 0;
+        virtual int dev_output_log_buffers(const char *buffer_addr, int buffer_len, uint64_t timestamp) = 0;
         virtual int dev_extradata_log_buffers(char *buffer_addr) = 0;
         OMX_ERRORTYPE component_role_enum(
                 OMX_HANDLETYPE hComp,
@@ -434,7 +449,9 @@ class omx_video: public qc_omx_component
             OMX_COMPONENT_GENERATE_HARDWARE_ERROR = 0x11,
             OMX_COMPONENT_GENERATE_LTRUSE_FAILED = 0x12,
             OMX_COMPONENT_GENERATE_ETB_OPQ = 0x13,
-            OMX_COMPONENT_CLOSE_MSG = 0x14
+            OMX_COMPONENT_GENERATE_UNSUPPORTED_SETTING = 0x14,
+            OMX_COMPONENT_GENERATE_HARDWARE_OVERLOAD = 0x15,
+            OMX_COMPONENT_CLOSE_MSG = 0x16
         };
 
         struct omx_event {
@@ -515,8 +532,7 @@ class omx_video: public qc_omx_component
                 struct pmem &Input_pmem_info,unsigned long &index);
         OMX_ERRORTYPE queue_meta_buffer(OMX_HANDLETYPE hComp,
                 struct pmem &Input_pmem_info);
-        OMX_ERRORTYPE push_empty_eos_buffer(OMX_HANDLETYPE hComp,
-                OMX_BUFFERHEADERTYPE *buffer);
+        OMX_ERRORTYPE push_empty_eos_buffer(OMX_HANDLETYPE hComp);
         OMX_ERRORTYPE fill_this_buffer_proxy(OMX_HANDLETYPE hComp,
                 OMX_BUFFERHEADERTYPE *buffer);
         bool release_done();
@@ -534,7 +550,7 @@ class omx_video: public qc_omx_component
                    );
         OMX_ERRORTYPE get_supported_profile_level(OMX_VIDEO_PARAM_PROFILELEVELTYPE *profileLevelType);
         inline void omx_report_error () {
-            if (m_pCallbacks.EventHandler && !m_error_propogated) {
+            if (m_pCallbacks.EventHandler && !m_error_propogated && m_state != OMX_StateLoaded) {
                 m_error_propogated = true;
                 DEBUG_PRINT_ERROR("ERROR: send OMX_ErrorHardware to Client");
                 m_pCallbacks.EventHandler(&m_cmp,m_app_data,
@@ -544,7 +560,7 @@ class omx_video: public qc_omx_component
 
         inline void omx_report_hw_overload ()
         {
-            if (m_pCallbacks.EventHandler && !m_error_propogated) {
+            if (m_pCallbacks.EventHandler && !m_error_propogated && m_state != OMX_StateLoaded) {
                 m_error_propogated = true;
                 DEBUG_PRINT_ERROR("ERROR: send OMX_ErrorInsufficientResources to Client");
                 m_pCallbacks.EventHandler(&m_cmp, m_app_data,
@@ -553,7 +569,7 @@ class omx_video: public qc_omx_component
         }
 
         inline void omx_report_unsupported_setting () {
-            if (m_pCallbacks.EventHandler && !m_error_propogated) {
+            if (m_pCallbacks.EventHandler && !m_error_propogated && m_state != OMX_StateLoaded) {
                 m_error_propogated = true;
                 m_pCallbacks.EventHandler(&m_cmp,m_app_data,
                         OMX_EventError,OMX_ErrorUnsupportedSetting,0,NULL);
@@ -561,7 +577,17 @@ class omx_video: public qc_omx_component
         }
 
         void complete_pending_buffer_done_cbs();
+        bool is_conv_needed(int, int);
         void print_debug_color_aspects(ColorAspects *aspects, const char *prefix);
+
+        OMX_ERRORTYPE get_vendor_extension_config(
+                OMX_CONFIG_ANDROID_VENDOR_EXTENSIONTYPE *ext);
+        OMX_ERRORTYPE set_vendor_extension_config(
+                OMX_CONFIG_ANDROID_VENDOR_EXTENSIONTYPE *ext);
+        void init_vendor_extensions(VendorExtensionStore&);
+        // Extensions-store is immutable after initialization (i.e cannot add/remove/change
+        //  extensions once added !)
+        const VendorExtensionStore mVendorExtensionStore;
 
 #ifdef USE_ION
         int alloc_map_ion_memory(int size,
@@ -569,10 +595,6 @@ class omx_video: public qc_omx_component
                                  struct ion_fd_data *fd_data,int flag);
         void free_ion_memory(struct venc_ion *buf_ion_info);
 #endif
-
-        inline bool omx_close_msg_thread(unsigned char id) {
-            return (id == OMX_COMPONENT_CLOSE_MSG);
-        }
 
         //*************************************************************
         //*******************MEMBER VARIABLES *************************
@@ -618,9 +640,11 @@ class omx_video: public qc_omx_component
         OMX_CONFIG_INTRAREFRESHVOPTYPE m_sConfigIntraRefreshVOP;
         OMX_VIDEO_PARAM_QUANTIZATIONTYPE m_sSessionQuantization;
         OMX_QCOM_VIDEO_PARAM_QPRANGETYPE m_sSessionQPRange;
+        OMX_QCOM_VIDEO_PARAM_IPB_QPRANGETYPE m_sSessionIPBQPRange;
         OMX_VIDEO_PARAM_AVCSLICEFMO m_sAVCSliceFMO;
         QOMX_VIDEO_INTRAPERIODTYPE m_sIntraperiod;
         OMX_VIDEO_PARAM_ERRORCORRECTIONTYPE m_sErrorCorrection;
+        QOMX_VIDEO_PARAM_SLICE_SPACING_TYPE m_sSliceSpacing;
         OMX_VIDEO_PARAM_INTRAREFRESHTYPE m_sIntraRefresh;
         QOMX_VIDEO_PARAM_LTRMODE_TYPE m_sParamLTRMode;
         QOMX_VIDEO_PARAM_LTRCOUNT_TYPE m_sParamLTRCount;
@@ -632,13 +656,31 @@ class omx_video: public qc_omx_component
         QOMX_VIDEO_HIERARCHICALLAYERS m_sHierLayers;
         OMX_QOMX_VIDEO_MBI_STATISTICS m_sMBIStatistics;
         QOMX_EXTNINDEX_VIDEO_INITIALQP m_sParamInitqp;
-        QOMX_EXTNINDEX_VIDEO_MAX_HIER_P_LAYERS m_sMaxHPlayers;
+        QOMX_EXTNINDEX_VIDEO_HIER_P_LAYERS m_sHPlayers;
+        OMX_SKYPE_VIDEO_CONFIG_BASELAYERPID m_sBaseLayerID;
+        OMX_SKYPE_VIDEO_PARAM_DRIVERVER m_sDriverVer;
+        OMX_SKYPE_VIDEO_CONFIG_QP m_sConfigQP;
+        QOMX_EXTNINDEX_VIDEO_VENC_SAR m_sSar;
+        QOMX_VIDEO_H264ENTROPYCODINGTYPE m_sParamEntropy;
+        PrependSPSPPSToIDRFramesParams m_sPrependSPSPPS;
+        struct timestamp_info {
+            OMX_S64 ts;
+            omx_cmd_queue deferred_inbufq;
+            pthread_mutex_t m_lock;
+        } m_TimeStampInfo;
         OMX_U32 m_sExtraData;
         OMX_U32 m_input_msg_id;
-        DescribeColorAspectsParams m_sConfigColorAspects;
+        QOMX_EXTNINDEX_VIDEO_VENC_LOW_LATENCY_MODE m_slowLatencyMode;
 #ifdef SUPPORT_CONFIG_INTRA_REFRESH
         OMX_VIDEO_CONFIG_ANDROID_INTRAREFRESHTYPE m_sConfigIntraRefresh;
 #endif
+        OMX_QTI_VIDEO_CONFIG_BLURINFO       m_blurInfo;
+        DescribeColorAspectsParams m_sConfigColorAspects;
+        OMX_VIDEO_PARAM_ANDROID_TEMPORALLAYERINGTYPE m_sParamTemporalLayers;
+        OMX_VIDEO_CONFIG_ANDROID_TEMPORALLAYERINGTYPE m_sConfigTemporalLayers;
+        QOMX_ENABLETYPE m_sParamAVTimerTimestampMode;   // use VT-timestamps in gralloc-handle
+        QOMX_ENABLETYPE m_sParamControlInputQueue;
+        OMX_TIME_CONFIG_TIMESTAMPTYPE m_sConfigInputTrigTS;
 
         // fill this buffer queue
         omx_cmd_queue m_ftb_q;
@@ -664,20 +706,19 @@ class omx_video: public qc_omx_component
         bool allocate_native_handle;
 
         uint64_t m_out_bm_count;
+        uint64_t m_client_out_bm_count;
         uint64_t m_inp_bm_count;
         uint64_t m_flags;
         uint64_t m_etb_count;
         uint64_t m_fbd_count;
-#ifdef _ANDROID_
-        // Heap pointer to frame buffers
-        sp<MemoryHeapBase>    m_heap_ptr;
-#endif //_ANDROID_
+        OMX_TICKS m_etb_timestamp;
         // to know whether Event Port Settings change has been triggered or not.
         bool m_event_port_settings_sent;
         OMX_U8                m_cRole[OMX_MAX_STRINGNAME_SIZE];
         extra_data_handler extra_data_handle;
         bool hw_overload;
-
+        size_t m_graphicbuffer_size;
+        char m_platform[OMX_MAX_STRINGNAME_SIZE];
 };
 
 #endif // __OMX_VIDEO_BASE_H__

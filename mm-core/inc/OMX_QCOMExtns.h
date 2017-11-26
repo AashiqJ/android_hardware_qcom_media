@@ -1,5 +1,5 @@
 /*--------------------------------------------------------------------------
-Copyright (c) 2009-2016, The Linux Foundation. All rights reserved.
+Copyright (c) 2009-2017, The Linux Foundation. All rights reserved.
 
 Redistribution and use in source and binary forms, with or without
 modification, are permitted provided that the following conditions are met:
@@ -119,6 +119,14 @@ struct OMX_QCOM_PARAM_MEMMAPENTRYTYPE
  */
 #define QOMX_ErrorLTRUseFailed        (OMX_ErrorVendorStartUnused + 1)
 
+/*
+ * This rate control will be used for low bitrate applications to get better
+ * video quality for a given bitrate.
+ */
+#define QOMX_Video_ControlRateMaxBitrate (OMX_Video_ControlRateVendorStartUnused + 1)
+
+#define QOMX_Video_ControlRateMaxBitrateSkipFrames (OMX_Video_ControlRateVendorStartUnused + 2)
+
 #define QOMX_VIDEO_BUFFERFLAG_BFRAME 0x00100000
 
 #define QOMX_VIDEO_BUFFERFLAG_EOSEQ  0x00200000
@@ -214,6 +222,18 @@ typedef struct OMX_QCOM_VIDEO_PARAM_QPRANGETYPE {
     OMX_U32 maxQP;
 } OMX_QCOM_VIDEO_PARAM_QPRANGETYPE;
 
+typedef struct OMX_QCOM_VIDEO_PARAM_IPB_QPRANGETYPE {
+    OMX_U32 nSize;
+    OMX_VERSIONTYPE nVersion;
+    OMX_U32 nPortIndex;
+    OMX_U32 minIQP;
+    OMX_U32 maxIQP;
+    OMX_U32 minPQP;
+    OMX_U32 maxPQP;
+    OMX_U32 minBQP;
+    OMX_U32 maxBQP;
+} OMX_QCOM_VIDEO_PARAM_IPB_QPRANGETYPE;
+
 #define OMX_QCOM_PLATFORMPVT_EXTN   "OMX.QCOM.index.param.platformprivate"
 /** Allowed APIs on the above Index: OMX_SetParameter() */
 
@@ -307,6 +327,7 @@ enum OMX_QCOM_COLOR_FORMATTYPE
     QOMX_COLOR_FORMATYUV420PackedSemiPlanar32mCompressed,
     QOMX_COLOR_Format32bitRGBA8888,
     QOMX_COLOR_Format32bitRGBA8888Compressed,
+    QOMX_COLOR_FORMATYUV420PackedSemiPlanar32m10bitCompressed,
     QOMX_COLOR_FormatAndroidOpaque = (OMX_COLOR_FORMATTYPE) OMX_COLOR_FormatVendorStartUnused  + 0x789,
 };
 
@@ -324,6 +345,7 @@ enum OMX_QCOM_VIDEO_CODINGTYPE
     QOMX_VIDEO_CodingHevc = OMX_VIDEO_CodingHEVC, /**< keeping old enum for backwards compatibility*/
     QOMX_VIDEO_CodingMVC = 0x7FA30C07,
     QOMX_VIDEO_CodingVp9 = OMX_VIDEO_CodingVP9,   /**< keeping old enum for backwards compatibility*/
+    QOMX_VIDEO_CodingTME = 0x7FA30C09,
 };
 
 enum OMX_QCOM_EXTN_INDEXTYPE
@@ -446,7 +468,7 @@ enum OMX_QCOM_EXTN_INDEXTYPE
     /* OMX.google.android.index.prependSPSPPSToIDRFrames */
     OMX_QcomIndexParamSequenceHeaderWithIDR = 0x7F00002A,
 
-    OMX_QcomIndexParamH264AUDelimiter = 0x7F00002B,
+    OMX_QcomIndexParamAUDelimiter = 0x7F00002B,
 
     OMX_QcomIndexParamVideoDownScalar = 0x7F00002C,
 
@@ -519,7 +541,7 @@ enum OMX_QCOM_EXTN_INDEXTYPE
 
     OMX_QcomIndexFlexibleYUVDescription = 0x7F000044,
 
-    /* Set Vpp Hqv Control Type */
+    /* Vpp Hqv Control Type */
     OMX_QcomIndexParamVppHqvControl = 0x7F000045,
 
     /* Enable VPP */
@@ -533,13 +555,12 @@ enum OMX_QCOM_EXTN_INDEXTYPE
 
     OMX_QcomIndexConfigH264EntropyCodingCabac = 0x7F000049,
 
+    /* "OMX.QCOM.index.param.video.InputBatch" */
     OMX_QcomIndexParamBatchSize = 0x7F00004A,
 
-    OMX_QcomIndexConfigMaxHierPLayers = 0x7F00004B,
+    OMX_QcomIndexConfigNumHierPLayers = 0x7F00004B,
 
     OMX_QcomIndexConfigRectType = 0x7F00004C,
-
-    OMX_QcomIndexSkypeExtensionBase = 0x7F00004D,
 
     OMX_QcomIndexConfigBaseLayerId = 0x7F00004E,
 
@@ -554,15 +575,48 @@ enum OMX_QCOM_EXTN_INDEXTYPE
     /* Enable VQZIP SEI NAL type */
     OMX_QTIIndexParamVQZIPSEIType = 0x7F000053,
 
-    /* Encoder Low Latency mode */
-    OMX_QcomIndexConfigVideoVencLowLatencyMode = 0x7F000054,
+    OMX_QTIIndexParamPassInputBufferFd = 0x7F000054,
 
     /* Set Prefer-adaptive playback*/
     /* "OMX.QTI.index.param.video.PreferAdaptivePlayback" */
     OMX_QTIIndexParamVideoPreferAdaptivePlayback = 0x7F000055,
 
+    /* Set time params */
+    OMX_QTIIndexConfigSetTimeData = 0x7F000056,
+    /* Force Compressed format for DPB when resolution <=1080p
+     * and OPB is cpu_access */
+    /* OMX.QTI.index.param.video.ForceCompressedForDPB */
+    OMX_QTIIndexParamForceCompressedForDPB = 0x7F000057,
+
+    /* Enable ROI info */
+    OMX_QTIIndexParamVideoEnableRoiInfo = 0x7F000058,
+
+    /* Configure ROI info */
+    OMX_QTIIndexConfigVideoRoiInfo = 0x7F000059,
+
+    /* Encoder Low Latency mode */
+    OMX_QcomIndexConfigVideoVencLowLatencyMode = 0x7F00005A,
+
+    /* Set Low Latency Mode */
+    OMX_QTIIndexParamLowLatencyMode = 0x7F00005B,
+
+    /* Force OPB to UnCompressed mode */
+    OMX_QTIIndexParamForceUnCompressedForOPB = 0x7F00005C,
+
     /* OMX.google.android.index.allocateNativeHandle */
     OMX_GoogleAndroidIndexAllocateNativeHandle = 0x7F00005D,
+
+    /* Configure BLUR resolution for encode */
+    OMX_QTIIndexConfigVideoBlurResolution = 0x7F00005E,
+
+    /* QP range for I frame B frame P frame */
+    OMX_QcomIndexParamVideoIPBQPRange = 0x7F00005F,
+
+    /* Enable client extradata */
+    OMX_QTIIndexParamVideoClientExtradata = 0x7F000060,
+
+    /* H264 transform 8x8 mode */
+    OMX_QcomIndexConfigH264Transform8x8 = 0x7F000061,
 
     /*"OMX.google.android.index.describeColorAspects"*/
     OMX_QTIIndexConfigDescribeColorAspects = 0x7F000062,
@@ -574,18 +628,36 @@ enum OMX_QCOM_EXTN_INDEXTYPE
     OMX_QTIIndexParamVC1SeqDispExtraData = 0x7F000065,
 
     OMX_QTIIndexParamVPXColorSpaceExtraData = 0x7F000066,
-    /* Enable client extradata */
-    OMX_QTIIndexParamVideoClientExtradata = 0x7F000060,
+
+    /*"OMX.google.android.index.describeHDRStaticInfo"*/
+    OMX_QTIIndexConfigDescribeHDRColorInfo = 0x7F000067,
+
+    /* Configure to disable PQ*/
+    OMX_QTIIndexParamDisablePQ = 0x7F000068,
+
+    /* Dither control for 10bit */
+    OMX_QTIIndexParamDitherControl = 0x7F000069,
 
     /* Suggest how big Iframe sizes should be */
     OMX_QTIIndexParamIframeSizeType = 0x7F000070,
 
-    /* Dither control for 10bit */
-    OMX_QTIIndexParamDitherControl = 0x7F000069,
     /* use av-timer ticks as timestamp (used by VT-client) */
     OMX_QTIIndexParamEnableAVTimerTimestamps = 0x7F000071,
 
-    OMX_QcomIndexParamAUDelimiter = 0x7F000072,
+    /* OMX.QTI.index.config.video.getdsmode */
+    OMX_QTIIndexConfigGetDSMode = 0x7F000072,
+
+    /* Controlled Input queue mode for frame accurate configuration */
+    OMX_QcomIndexParamVencControlInputQueue = 0x7F000073,
+
+    /**
+    *  Configure Slice Header Spacing
+    *  This index will be used to configure both byte based
+    *  and MB based slice header spacing. This is the preferred
+    *  alternative to OMX_IndexParamVideoAvc (for MB based)
+    *  and OMX_IndexParamVideoErrorCorrection (for byte based)
+    */
+    OMX_QcomIndexParamVideoSliceSpacing = 0x7F000074,
 
     /* Capabilities */
     OMX_QTIIndexParamCapabilitiesVTDriverVersion = 0x7F100000,
@@ -599,6 +671,23 @@ enum OMX_QCOM_EXTN_INDEXTYPE
     OMX_QTIIndexParamCapabilitiesRotationSupport= 0x7F100004,
 
 };
+
+/**
+* This is custom extension to configure Low Latency Mode.
+*
+* STRUCT MEMBERS
+*
+* nSize         : Size of Structure in bytes
+* nVersion      : OpenMAX IL specification version information
+* bLowLatencyMode   : Enable/Disable Low Latency mode
+*/
+
+typedef struct QOMX_EXTNINDEX_VIDEO_VENC_LOW_LATENCY_MODE
+{
+   OMX_U32 nSize;
+   OMX_VERSIONTYPE nVersion;
+   OMX_BOOL bLowLatencyMode;
+} QOMX_EXTNINDEX_VIDEO_VENC_LOW_LATENCY_MODE;
 
 /**
 * This is custom extension to configure Encoder Aspect Ratio.
@@ -627,16 +716,17 @@ typedef struct QOMX_EXTNINDEX_VIDEO_VENC_SAR
 *
 * nSize         : Size of Structure in bytes
 * nVersion      : OpenMAX IL specification version information
-* nMaxHierLayers: Set the max number of Hier-p layers for the session
-*                  - This should be less than the Hier-P layers set
-*                    for the session.
+* nNumHierLayers: Set the number of Hier-p layers for the session
+*                  - This should be less than the MAX Hier-P
+*                    layers set for the session.
 */
 
-typedef struct QOMX_EXTNINDEX_VIDEO_MAX_HIER_P_LAYERS {
+typedef struct QOMX_EXTNINDEX_VIDEO_HIER_P_LAYERS {
    OMX_U32 nSize;
    OMX_VERSIONTYPE nVersion;
-   OMX_U32 nMaxHierLayers;
-} QOMX_EXTNINDEX_VIDEO_MAX_HIER_P_LAYERS;
+   OMX_U32 nNumHierLayers;
+} QOMX_EXTNINDEX_VIDEO_HIER_P_LAYERS;
+
 
 /**
 * This is custom extension to configure Hybrid Hier-p settings.
@@ -1035,15 +1125,15 @@ typedef struct OMX_QCOM_VIDEO_CONFIG_QPRANGE
 
 /**
  * This structure describes the parameters for the
- * OMX_QcomIndexParamH264AUDelimiter extension.  It enables/disables
- * the AU delimiters in the H264 stream, which is used by WFD.
+ * OMX_QcomIndexParamAUDelimiter extension.  It enables/disables
+ * the AU delimiters in the stream.
  */
-typedef struct OMX_QCOM_VIDEO_CONFIG_H264_AUD
+typedef struct OMX_QCOM_VIDEO_CONFIG_AUD
 {
    OMX_U32 nSize;           /** Size of the structure in bytes */
    OMX_VERSIONTYPE nVersion;/** OMX specification version information */
    OMX_BOOL bEnable;        /** Enable/disable the setting */
-} OMX_QCOM_VIDEO_CONFIG_H264_AUD;
+} OMX_QCOM_VIDEO_CONFIG_AUD;
 
 typedef enum QOMX_VIDEO_PERF_LEVEL
 {
@@ -1122,6 +1212,36 @@ typedef struct OMX_QCOM_VIDEO_PARAM_PEAK_BITRATE {
     OMX_VERSIONTYPE nVersion;   /** OMX specification version information */
     OMX_U32 nPeakBitrate;       /** Peak bitrate value */
 } OMX_QCOM_VIDEO_PARAM_PEAK_BITRATE;
+
+/**
+ * This structure describes the parameters corresponding
+ * to OMX_QTIIndexParamForceCompressedForDPB extension. Enabling
+ * this extension will force the split mode DPB(compressed)/OPB(Linear)
+ * for all resolutions.On some chipsets preferred mode would be combined
+ * Linear for both DPB/OPB to save memory. For example on 8996 preferred mode
+ * would be combined linear for resolutions <= 1080p .
+ * Enabling this might save power but with the cost
+ * of increased memory i.e almost double the number on output YUV buffers.
+ */
+typedef struct OMX_QTI_VIDEO_PARAM_FORCE_COMPRESSED_FOR_DPB_TYPE {
+    OMX_U32 nSize;              /** Size of the structure in bytes */
+    OMX_VERSIONTYPE nVersion;   /** OMX specification version information */
+    OMX_BOOL bEnable;           /** Enable/disable the setting */
+} OMX_QTI_VIDEO_PARAM_FORCE_COMPRESSED_FOR_DPB_TYPE;
+
+/**
+ * This structure describes the parameters corresponding
+ * to OMX_QTIIndexParamForceUnCompressedForOPB extension. Enabling this
+ * extension will force the OPB to be linear for the current video session.
+ * If this property is not set, then the OPB will be set to linear or compressed
+ * based on resolution selected and/or if cpu access is requested on the
+ * OPB buffer.
+ */
+typedef struct OMX_QTI_VIDEO_PARAM_FORCE_UNCOMPRESSED_FOR_OPB_TYPE {
+    OMX_U32 nSize;              /** Sizeo f the structure in bytes */
+    OMX_VERSIONTYPE nVersion;   /** OMX specification version information */
+    OMX_BOOL bEnable;           /** Enable/disable the setting */
+} OMX_QTI_VIDEO_PARAM_FORCE_UNCOMPRESSED_FOR_OPB_TYPE;
 
 typedef struct OMX_VENDOR_EXTRADATATYPE  {
     OMX_U32 nPortIndex;
@@ -1258,6 +1378,7 @@ typedef struct OMX_QCOM_EXTRADATA_FRAMEINFO
    OMX_QCOM_ASPECT_RATIO  aspectRatio;
    OMX_QCOM_DISPLAY_ASPECT_RATIO displayAspectRatio;
    OMX_U32                nConcealedMacroblocks;
+   OMX_U32                nRecoverySeiFlag;
    OMX_U32                nFrameRate;
    OMX_TICKS              nTimeStamp;
 } OMX_QCOM_EXTRADATA_FRAMEINFO;
@@ -1302,6 +1423,39 @@ typedef struct OMX_QCOM_EXTRADATA_VQZIPSEI {
     OMX_U8 data[0];
 } OMX_QCOM_EXTRADATA_VQZIPSEI;
 
+typedef struct OMX_QTI_VIDEO_PARAM_ENABLE_ROIINFO {
+    OMX_U32         nSize;
+    OMX_VERSIONTYPE nVersion;
+    OMX_U32         nPortIndex;
+    OMX_BOOL        bEnableRoiInfo;
+} OMX_QTI_VIDEO_PARAM_ENABLE_ROIINFO;
+
+typedef struct OMX_QTI_VIDEO_CONFIG_ROIINFO {
+    OMX_U32         nSize;
+    OMX_VERSIONTYPE nVersion;
+    OMX_U32         nPortIndex;
+    OMX_S32         nUpperQpOffset;
+    OMX_S32         nLowerQpOffset;
+    OMX_BOOL        bUseRoiInfo;
+    OMX_S32         nRoiMBInfoSize;
+    OMX_PTR         pRoiMBInfo;
+} OMX_QTI_VIDEO_CONFIG_ROIINFO;
+
+typedef enum OMX_QTI_VIDEO_BLUR_RESOLUTION {
+    BLUR_RESOL_DISABLED = 0,
+    BLUR_RESOL_240      = 1,
+    BLUR_RESOL_480      = 2,
+    BLUR_RESOL_720      = 3,
+    BLUR_RESOL_1080     = 4,
+} OMX_QTI_VIDEO_BLUR_RESOLUTION;
+
+typedef struct OMX_QTI_VIDEO_CONFIG_BLURINFO {
+    OMX_U32         nSize;
+    OMX_VERSIONTYPE nVersion;
+    OMX_U32         nPortIndex;
+    OMX_QTI_VIDEO_BLUR_RESOLUTION eTargetResol;
+} OMX_QTI_VIDEO_CONFIG_BLURINFO;
+
 typedef enum OMX_QCOM_EXTRADATATYPE
 {
     OMX_ExtraDataFrameInfo =               0x7F000001,
@@ -1320,6 +1474,10 @@ typedef enum OMX_QCOM_EXTRADATATYPE
     OMX_ExtraDataInputBitsInfo =           0x7F00000e,
     OMX_ExtraDataVideoEncoderMBInfo =      0x7F00000f,
     OMX_ExtraDataVQZipSEI  =               0x7F000010,
+    OMX_ExtraDataDisplayColourSEI =        0x7F000011,
+    OMX_ExtraDataLightLevelSEI =           0x7F000012,
+    OMX_ExtraDataEncoderOverrideQPInfo =   0x7F000013,
+    OMX_ExtraDataOutputCropInfo =          0x7F000014,
 } OMX_QCOM_EXTRADATATYPE;
 
 struct ExtraDataMap {
@@ -1367,6 +1525,26 @@ typedef enum OMX_INTERLACETYPE
    OMX_InterlaceFrameBottomFieldFirst
 } OMX_INTERLACES;
 
+typedef enum QOMX_VIDEO_RECOVERYSEITYPE {
+/*
+ * 0: Frame reconstruction is incorrect
+ *   a) Open Gop, frames before recovery point SEI
+ * 1: Frame reconstruction is correct.
+ *   a) Closed Gop, When decoding starts from the top of closed GOP at IDR
+ *   b) Open Gop, Output at and subsequent to recovery point SEI with
+ *      exact_match_flag = true
+ * 2: Frame reconstruction is approximately correct:
+ *   a) Closed Gop, When decoding starts from a P/B/I frames wihtout
+ *      any recovery point SEI information
+ *   b) Open Gop, Output at and subsequent to recovery point SEI with
+ *      exact_match_flag = false
+ * In case flag is set to 0 or 2, DATACORRUPT shall be enabled
+ * for buffer (nFlags) in FILL_BUFFER_DONE
+ */
+    OMX_FRAME_RECONSTRUCTION_INCORRECT = 0,
+    OMX_FRAME_RECONSTRUCTION_CORRECT = 1,
+    OMX_FRAME_RECONSTRUCTION_APPROXIMATELY_CORRECT = 2
+} QOMX_VIDEO_RECOVERYSEI;
 
 #define OMX_EXTRADATA_HEADER_SIZE 20
 
@@ -1564,6 +1742,12 @@ typedef struct QOMX_ENABLETYPE {
     OMX_BOOL bEnable;
 } QOMX_ENABLETYPE;
 
+typedef struct QOMX_DISABLETYPE {
+    OMX_U32 nSize;
+    OMX_VERSIONTYPE nVersion;
+    OMX_BOOL bDisable;
+} QOMX_DISABLETYPE;
+
 typedef enum QOMX_VIDEO_EVENTS {
     OMX_EventIndexsettingChanged = OMX_EventVendorStartUnused
 } QOMX_VIDEO_EVENTS;
@@ -1619,34 +1803,28 @@ typedef struct QOMX_VIDEO_CUSTOM_BUFFERSIZE {
 #define OMX_QCOM_INDEX_CONFIG_VIDEO_FRAMEPACKING_INFO "OMX.QCOM.index.config.video.FramePackingInfo"
 #define OMX_QCOM_INDEX_PARAM_VIDEO_MPEG2SEQDISP_EXTRADATA "OMX.QCOM.index.param.video.Mpeg2SeqDispExtraData"
 
-
 #define OMX_QCOM_INDEX_PARAM_VIDEO_HIERSTRUCTURE "OMX.QCOM.index.param.video.HierStructure"
 #define OMX_QCOM_INDEX_PARAM_VIDEO_LTRCOUNT "OMX.QCOM.index.param.video.LTRCount"
 #define OMX_QCOM_INDEX_PARAM_VIDEO_LTRPERIOD "OMX.QCOM.index.param.video.LTRPeriod"
 #define OMX_QCOM_INDEX_CONFIG_VIDEO_LTRUSE "OMX.QCOM.index.config.video.LTRUse"
 #define OMX_QCOM_INDEX_CONFIG_VIDEO_LTRMARK "OMX.QCOM.index.config.video.LTRMark"
-#define OMX_QCOM_INDEX_CONFIG_VIDEO_MAX_HIER_P_LAYERS "OMX.QCOM.index.config.video.hierplayers"
-#define OMX_QCOM_INDEX_CONFIG_RECTANGLE_TYPE "OMX.QCOM.index.config.video.rectangle"
-#define OMX_QCOM_INDEX_PARAM_VIDEO_BASE_LAYER_ID "OMX.QCOM.index.param.video.baselayerid"
-#define OMX_QCOM_INDEX_PARAM_VIDEO_DRIVERVERSION "OMX.QCOM.index.param.video.FramePackingInfo"
-#define OMX_QCOM_INDEX_CONFIG_VIDEO_QP "OMX.QCOM.index.config.video.qp"
-#define OMX_QCOM_INDEX_PARAM_VIDEO_SAR "OMX.QCOM.index.param.video.sar"
-
-
-#define OMX_QCOM_INDEX_PARAM_VIDEO_HIERSTRUCTURE "OMX.QCOM.index.param.video.HierStructure"
-#define OMX_QCOM_INDEX_PARAM_VIDEO_LTRCOUNT "OMX.QCOM.index.param.video.LTRCount"
-#define OMX_QCOM_INDEX_PARAM_VIDEO_LTRPERIOD "OMX.QCOM.index.param.video.LTRPeriod"
-#define OMX_QCOM_INDEX_CONFIG_VIDEO_LTRUSE "OMX.QCOM.index.config.video.LTRUse"
-#define OMX_QCOM_INDEX_CONFIG_VIDEO_LTRMARK "OMX.QCOM.index.config.video.LTRMark"
-#define OMX_QCOM_INDEX_CONFIG_VIDEO_MAX_HIER_P_LAYERS "OMX.QCOM.index.config.video.hierplayers"
+#define OMX_QCOM_INDEX_CONFIG_VIDEO_HIER_P_LAYERS "OMX.QCOM.index.config.video.hierplayers"
 #define OMX_QCOM_INDEX_CONFIG_RECTANGLE_TYPE "OMX.QCOM.index.config.video.rectangle"
 #define OMX_QCOM_INDEX_PARAM_VIDEO_BASE_LAYER_ID "OMX.QCOM.index.param.video.baselayerid"
 #define OMX_QCOM_INDEX_CONFIG_VIDEO_QP "OMX.QCOM.index.config.video.qp"
 #define OMX_QCOM_INDEX_PARAM_VIDEO_SAR "OMX.QCOM.index.param.video.sar"
+#define OMX_QTI_INDEX_PARAM_VIDEO_LOW_LATENCY "OMX.QTI.index.param.video.LowLatency"
 
+#define OMX_QCOM_INDEX_PARAM_VIDEO_PASSINPUTBUFFERFD "OMX.QCOM.index.param.video.PassInputBufferFd"
 #define OMX_QTI_INDEX_PARAM_VIDEO_PREFER_ADAPTIVE_PLAYBACK "OMX.QTI.index.param.video.PreferAdaptivePlayback"
-#define OMX_QTI_INDEX_CONFIG_COLOR_ASPECTS "OMX.google.android.index.describeColorAspects"
+#define OMX_QTI_INDEX_CONFIG_VIDEO_SETTIMEDATA "OMX.QTI.index.config.video.settimedata"
+#define OMX_QTI_INDEX_PARAM_VIDEO_FORCE_COMPRESSED_FOR_DPB "OMX.QTI.index.param.video.ForceCompressedForDPB"
+#define OMX_QTI_INDEX_PARAM_VIDEO_ENABLE_ROIINFO "OMX.QTI.index.param.enableRoiInfo"
+#define OMX_QTI_INDEX_CONFIG_VIDEO_ROIINFO "OMX.QTI.index.config.RoiInfo"
+#define OMX_QTI_INDEX_CONFIG_VIDEO_BLURINFO "OMX.QTI.index.config.BlurInfo"
 #define OMX_QTI_INDEX_PARAM_VIDEO_CLIENT_EXTRADATA "OMX.QTI.index.param.client.extradata"
+#define OMX_QTI_INDEX_CONFIG_COLOR_ASPECTS "OMX.google.android.index.describeColorAspects"
+#define OMX_QTI_INDEX_CONFIG_VIDEO_GETDSMODE "OMX.QTI.index.config.video.getdsmode"
 
 typedef enum {
     QOMX_VIDEO_FRAME_PACKING_CHECKERBOARD = 0,
@@ -2035,6 +2213,20 @@ typedef struct QOMX_VIDEO_DITHER_CONTROL {
     OMX_U32 nPortIndex;
     QOMX_VIDEO_DITHERTYPE eDitherType;
 } QOMX_VIDEO_DITHER_CONTROL;
+
+typedef enum QOMX_VIDEO_SLICEMODETYPE {
+    QOMX_SLICEMODE_DISABLE = 0,
+    QOMX_SLICEMODE_MB_COUNT = 0x01,
+    QOMX_SLICEMODE_BYTE_COUNT = 0x02,
+} QOMX_VIDEO_SLICEMODETYPE;
+
+typedef struct QOMX_VIDEO_PARAM_SLICE_SPACING_TYPE {
+    OMX_U32 nSize;
+    OMX_VERSIONTYPE nVersion;
+    OMX_U32 nPortIndex;
+    QOMX_VIDEO_SLICEMODETYPE eSliceMode;
+    OMX_U32 nSliceSize;
+} QOMX_VIDEO_PARAM_SLICE_SPACING_TYPE;
 
 #ifdef __cplusplus
 }

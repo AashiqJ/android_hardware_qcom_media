@@ -1,5 +1,5 @@
 /*--------------------------------------------------------------------------
-Copyright (c) 2010-2015, The Linux Foundation. All rights reserved.
+Copyright (c) 2010-2017, The Linux Foundation. All rights reserved.
 
 Redistribution and use in source and binary forms, with or without
 modification, are permitted provided that the following conditions are met:
@@ -36,26 +36,16 @@ ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #ifdef _ANDROID_
 #include <cutils/properties.h>
 #endif
-#ifndef _ANDROID_
+#ifdef _USE_GLIB_
 #include <glib.h>
 #define strlcpy g_strlcpy
 #endif
-/*----------------------------------------------------------------------------
- * Preprocessor Definitions and Constants
- * -------------------------------------------------------------------------*/
-
-#define OMX_SPEC_VERSION 0x00000101
-#define OMX_INIT_STRUCT(_s_, _name_)            \
-    memset((_s_), 0x0, sizeof(_name_));          \
-(_s_)->nSize = sizeof(_name_);               \
-(_s_)->nVersion.nVersion = OMX_SPEC_VERSION
 
 extern int m_pipe;
 static int bframes;
 static int entropy;
 static int perfmode;
 static int lowlatency;
-
 // factory function executed by the core to create instances
 void *get_omx_component_factory_fn(void)
 {
@@ -139,7 +129,6 @@ handle_err:
 
 omx_venc::omx_venc()
 {
-    DEBUG_PRINT_HIGH("omx_venc: constructor");
 #ifdef _ANDROID_ICS_
     meta_mode_enable = false;
     memset(meta_buffer_hdr,0,sizeof(meta_buffer_hdr));
@@ -150,36 +139,30 @@ omx_venc::omx_venc()
 #endif
     bframes = entropy = 0;
     char property_value[PROPERTY_VALUE_MAX] = {0};
-    property_get("vidc.debug.level", property_value, "1");
-    debug_level = atoi(property_value);
+    property_get("vendor.vidc.debug.level", property_value, "1");
+    debug_level = strtoul(property_value, NULL, 16);
     property_value[0] = '\0';
-    property_get("vidc.debug.bframes", property_value, "0");
+    property_get("vendor.vidc.debug.bframes", property_value, "0");
     bframes = atoi(property_value);
     property_value[0] = '\0';
-    property_get("vidc.debug.entropy", property_value, "1");
+    property_get("vendor.vidc.debug.entropy", property_value, "1");
     entropy = !!atoi(property_value);
     property_value[0] = '\0';
-    property_get("vidc.debug.perf.mode", property_value, "0");
+    property_get("vendor.vidc.debug.perf.mode", property_value, "0");
     perfmode = atoi(property_value);
     property_value[0] = '\0';
-    property_get("vidc.debug.lowlatency", property_value, "0");
+    handle = NULL;
+    property_get("vendor.vidc.debug.lowlatency", property_value, "0");
     lowlatency = atoi(property_value);
     property_value[0] = '\0';
     m_perf_control.send_hint_to_mpctl(true);
-    DEBUG_PRINT_HIGH("omx_venc: constructor completed");
 }
 
 omx_venc::~omx_venc()
 {
-    DEBUG_PRINT_HIGH("omx_venc: destructor");
     get_syntaxhdr_enable = false;
     m_perf_control.send_hint_to_mpctl(false);
-    if (handle) {
-        DEBUG_PRINT_HIGH("venc_close() in destructor");
-        handle->venc_close();
-        delete (handle);
-    }
-    DEBUG_PRINT_HIGH("omx_venc: destructor completed");
+    //nothing to do
 }
 
 /* ======================================================================
@@ -272,7 +255,8 @@ OMX_ERRORTYPE omx_venc::component_init(OMX_STRING role)
 
     if (handle->venc_open(codec_type) != true) {
         DEBUG_PRINT_ERROR("ERROR: venc_open failed");
-        return OMX_ErrorInsufficientResources;
+        eRet = OMX_ErrorInsufficientResources;
+        goto init_error;
     }
 
     //Intialise the OMX layer variables
@@ -311,6 +295,12 @@ OMX_ERRORTYPE omx_venc::component_init(OMX_STRING role)
     m_sConfigFrameRotation.nPortIndex = (OMX_U32) PORT_INDEX_OUT;
     m_sConfigFrameRotation.nRotation = 0;
 
+    OMX_INIT_STRUCT(&m_sConfigAVCIDRPeriod, OMX_VIDEO_CONFIG_AVCINTRAPERIOD);
+    m_sConfigAVCIDRPeriod.nPortIndex = (OMX_U32) PORT_INDEX_OUT;
+
+    OMX_INIT_STRUCT(&m_sPrependSPSPPS, PrependSPSPPSToIDRFramesParams);
+    m_sPrependSPSPPS.bEnable = OMX_FALSE;
+
     OMX_INIT_STRUCT(&m_sSessionQuantization, OMX_VIDEO_PARAM_QUANTIZATIONTYPE);
     m_sSessionQuantization.nPortIndex = (OMX_U32) PORT_INDEX_OUT;
     m_sSessionQuantization.nQpI = 9;
@@ -318,13 +308,21 @@ OMX_ERRORTYPE omx_venc::component_init(OMX_STRING role)
     m_sSessionQuantization.nQpB = 2;
 
     OMX_INIT_STRUCT(&m_sSessionQPRange, OMX_QCOM_VIDEO_PARAM_QPRANGETYPE);
+    OMX_INIT_STRUCT(&m_sSessionIPBQPRange, OMX_QCOM_VIDEO_PARAM_IPB_QPRANGETYPE);
     m_sSessionQPRange.nPortIndex = (OMX_U32) PORT_INDEX_OUT;
+    m_sSessionIPBQPRange.nPortIndex = (OMX_U32)PORT_INDEX_OUT;
     m_sSessionQPRange.minQP = 2;
-    if (codec_type == OMX_VIDEO_CodingAVC)
+    if (codec_type == OMX_VIDEO_CodingAVC) {
         m_sSessionQPRange.maxQP = 51;
-    else
+    } else {
         m_sSessionQPRange.maxQP = 31;
-
+    }
+    m_sSessionIPBQPRange.minIQP =
+                m_sSessionIPBQPRange.minPQP =
+                m_sSessionIPBQPRange.minBQP = m_sSessionQPRange.minQP;
+    m_sSessionIPBQPRange.maxIQP =
+                m_sSessionIPBQPRange.maxPQP =
+                m_sSessionIPBQPRange.maxBQP = m_sSessionQPRange.maxQP;
     OMX_INIT_STRUCT(&m_sAVCSliceFMO, OMX_VIDEO_PARAM_AVCSLICEFMO);
     m_sAVCSliceFMO.nPortIndex = (OMX_U32) PORT_INDEX_OUT;
     m_sAVCSliceFMO.eSliceMode = OMX_VIDEO_SLICEMODE_AVCDefault;
@@ -345,9 +343,19 @@ OMX_ERRORTYPE omx_venc::component_init(OMX_STRING role)
     m_sErrorCorrection.bEnableRVLC = OMX_FALSE;
     m_sErrorCorrection.nResynchMarkerSpacing = 0;
 
+    OMX_INIT_STRUCT(&m_sSliceSpacing, QOMX_VIDEO_PARAM_SLICE_SPACING_TYPE);
+    m_sSliceSpacing.nPortIndex = (OMX_U32) PORT_INDEX_OUT;
+    m_sSliceSpacing.eSliceMode = QOMX_SLICEMODE_MB_COUNT;
+
     OMX_INIT_STRUCT(&m_sIntraRefresh, OMX_VIDEO_PARAM_INTRAREFRESHTYPE);
     m_sIntraRefresh.nPortIndex = (OMX_U32) PORT_INDEX_OUT;
     m_sIntraRefresh.eRefreshMode = OMX_VIDEO_IntraRefreshMax;
+
+#ifdef SUPPORT_CONFIG_INTRA_REFRESH
+    OMX_INIT_STRUCT(&m_sConfigIntraRefresh, OMX_VIDEO_CONFIG_ANDROID_INTRAREFRESHTYPE);
+    m_sConfigIntraRefresh.nPortIndex = (OMX_U32) PORT_INDEX_OUT;
+    m_sConfigIntraRefresh.nRefreshPeriod = 0;
+#endif
 
     OMX_INIT_STRUCT(&m_sConfigColorAspects, DescribeColorAspectsParams);
     m_sConfigColorAspects.nPortIndex = (OMX_U32) PORT_INDEX_OUT;
@@ -355,11 +363,6 @@ OMX_ERRORTYPE omx_venc::component_init(OMX_STRING role)
     m_sConfigColorAspects.sAspects.mPrimaries = ColorAspects::PrimariesUnspecified;
     m_sConfigColorAspects.sAspects.mMatrixCoeffs = ColorAspects::MatrixUnspecified;
     m_sConfigColorAspects.sAspects.mTransfer = ColorAspects::TransferUnspecified;
-#ifdef SUPPORT_CONFIG_INTRA_REFRESH
-    OMX_INIT_STRUCT(&m_sConfigIntraRefresh, OMX_VIDEO_CONFIG_ANDROID_INTRAREFRESHTYPE);
-    m_sConfigIntraRefresh.nPortIndex = (OMX_U32) PORT_INDEX_OUT;
-    m_sConfigIntraRefresh.nRefreshPeriod = 0;
-#endif
 
     if (codec_type == OMX_VIDEO_CodingMPEG4) {
         m_sParamProfileLevel.eProfile = (OMX_U32) OMX_VIDEO_MPEG4ProfileSimple;
@@ -378,6 +381,9 @@ OMX_ERRORTYPE omx_venc::component_init(OMX_STRING role)
         m_sParamProfileLevel.eLevel = (OMX_U32) OMX_VIDEO_HEVCMainTierLevel1;
     }
 
+    OMX_INIT_STRUCT(&m_sParamEntropy,  QOMX_VIDEO_H264ENTROPYCODINGTYPE);
+    m_sParamEntropy.bCabac = OMX_FALSE;
+
     // Initialize the video parameters for input port
     OMX_INIT_STRUCT(&m_sInPortDef, OMX_PARAM_PORTDEFINITIONTYPE);
     m_sInPortDef.nPortIndex= (OMX_U32) PORT_INDEX_IN;
@@ -393,7 +399,7 @@ OMX_ERRORTYPE omx_venc::component_init(OMX_STRING role)
     m_sInPortDef.format.video.nBitrate = 64000;
     m_sInPortDef.format.video.xFramerate = 15 << 16;
     m_sInPortDef.format.video.eColorFormat = (OMX_COLOR_FORMATTYPE)
-        QOMX_COLOR_FORMATYUV420PackedSemiPlanar32m;
+        QOMX_DEFAULT_COLOR_FMT;
     m_sInPortDef.format.video.eCompressionFormat =  OMX_VIDEO_CodingUnused;
 
     if (dev_get_buf_req(&m_sInPortDef.nBufferCountMin,
@@ -401,7 +407,7 @@ OMX_ERRORTYPE omx_venc::component_init(OMX_STRING role)
                 &m_sInPortDef.nBufferSize,
                 m_sInPortDef.nPortIndex) != true) {
         eRet = OMX_ErrorUndefined;
-
+        goto init_error;
     }
 
     // Initialize the video parameters for output port
@@ -433,6 +439,7 @@ OMX_ERRORTYPE omx_venc::component_init(OMX_STRING role)
                 &m_sOutPortDef.nBufferSize,
                 m_sOutPortDef.nPortIndex) != true) {
         eRet = OMX_ErrorUndefined;
+        goto init_error;
     }
 
     // Initialize the video color format for input port
@@ -440,7 +447,7 @@ OMX_ERRORTYPE omx_venc::component_init(OMX_STRING role)
     m_sInPortFormat.nPortIndex = (OMX_U32) PORT_INDEX_IN;
     m_sInPortFormat.nIndex = 0;
     m_sInPortFormat.eColorFormat = (OMX_COLOR_FORMATTYPE)
-        QOMX_COLOR_FORMATYUV420PackedSemiPlanar32m;
+        QOMX_DEFAULT_COLOR_FMT;
     m_sInPortFormat.eCompressionFormat = OMX_VIDEO_CodingUnused;
 
 
@@ -508,7 +515,6 @@ OMX_ERRORTYPE omx_venc::component_init(OMX_STRING role)
     m_sParamAVC.nPFrames = (m_sOutPortFormat.xFramerate * 2 - 1); // 2 second intra period for default outport fps
     m_sParamAVC.nBFrames = 0;
     m_sParamAVC.bUseHadamard = OMX_FALSE;
-    m_sParamAVC.nRefFrames = 1;
     m_sParamAVC.nRefIdx10ActiveMinus1 = 1;
     m_sParamAVC.nRefIdx11ActiveMinus1 = 0;
     m_sParamAVC.bEnableUEP = OMX_FALSE;
@@ -564,11 +570,25 @@ OMX_ERRORTYPE omx_venc::component_init(OMX_STRING role)
     m_sMBIStatistics.nPortIndex = (OMX_U32) PORT_INDEX_OUT;
     m_sMBIStatistics.eMBIStatisticsType = QOMX_MBI_STATISTICS_MODE_DEFAULT;
 
-    //init remaining structures
-    OMX_INIT_STRUCT(&m_sConfigVp8ReferenceFrame, OMX_VIDEO_VP8REFERENCEFRAMETYPE);
-    OMX_INIT_STRUCT(&m_sConfigLTRPeriod, QOMX_VIDEO_CONFIG_LTRPERIOD_TYPE);
-    OMX_INIT_STRUCT(&m_sConfigLTRUse, QOMX_VIDEO_CONFIG_LTRUSE_TYPE);
-    OMX_INIT_STRUCT(&m_sConfigAVCIDRPeriod, OMX_VIDEO_CONFIG_AVCINTRAPERIOD);
+    OMX_INIT_STRUCT(&m_slowLatencyMode, QOMX_EXTNINDEX_VIDEO_VENC_LOW_LATENCY_MODE);
+    m_slowLatencyMode.bLowLatencyMode = OMX_FALSE;
+
+    OMX_INIT_STRUCT(&m_sParamTemporalLayers, OMX_VIDEO_PARAM_ANDROID_TEMPORALLAYERINGTYPE);
+    m_sParamTemporalLayers.eSupportedPatterns = OMX_VIDEO_AndroidTemporalLayeringPatternAndroid;
+
+    OMX_INIT_STRUCT(&m_sConfigTemporalLayers, OMX_VIDEO_CONFIG_ANDROID_TEMPORALLAYERINGTYPE);
+
+    OMX_INIT_STRUCT(&m_sParamAVTimerTimestampMode, QOMX_ENABLETYPE);
+    m_sParamAVTimerTimestampMode.bEnable = OMX_FALSE;
+
+    OMX_INIT_STRUCT(&m_sConfigQP, OMX_SKYPE_VIDEO_CONFIG_QP);
+    m_sConfigQP.nPortIndex = (OMX_U32) PORT_INDEX_OUT;
+    m_sConfigQP.nQP = 30;
+
+    OMX_INIT_STRUCT(&m_sParamControlInputQueue , QOMX_ENABLETYPE);
+    m_sParamControlInputQueue.bEnable = OMX_FALSE;
+
+    OMX_INIT_STRUCT(&m_sConfigInputTrigTS, OMX_TIME_CONFIG_TIMESTAMPTYPE);
 
     m_state                   = OMX_StateLoaded;
     m_sExtraData = 0;
@@ -577,11 +597,13 @@ OMX_ERRORTYPE omx_venc::component_init(OMX_STRING role)
         if (pipe(fds)) {
             DEBUG_PRINT_ERROR("ERROR: pipe creation failed");
             eRet = OMX_ErrorInsufficientResources;
+            goto init_error;
         } else {
             if (fds[0] == 0 || fds[1] == 0) {
                 if (pipe(fds)) {
                     DEBUG_PRINT_ERROR("ERROR: pipe creation failed");
                     eRet = OMX_ErrorInsufficientResources;
+                    goto init_error;
                 }
             }
             if (eRet == OMX_ErrorNone) {
@@ -589,11 +611,12 @@ OMX_ERRORTYPE omx_venc::component_init(OMX_STRING role)
                 m_pipe_out = fds[1];
 
                 msg_thread_created = true;
-                r = pthread_create(&msg_thread_id,0, enc_message_thread, this);
+                r = pthread_create(&msg_thread_id,0, message_thread_enc, this);
                 if (r < 0) {
                     DEBUG_PRINT_ERROR("ERROR: message_thread_enc thread creation failed");
                     eRet = OMX_ErrorInsufficientResources;
                     msg_thread_created = false;
+                    goto init_error;
                 } else {
                     async_thread_created = true;
                     r = pthread_create(&async_thread_id,0, venc_dev::async_venc_message_thread, this);
@@ -606,6 +629,7 @@ OMX_ERRORTYPE omx_venc::component_init(OMX_STRING role)
                         pthread_join(msg_thread_id,NULL);
                         msg_thread_created = false;
 
+                        goto init_error;
                     } else
                         dev_set_message_thread_id(async_thread_id);
                 }
@@ -621,7 +645,6 @@ OMX_ERRORTYPE omx_venc::component_init(OMX_STRING role)
             DEBUG_PRINT_ERROR("Failed setting PerfMode to %d", pParam.nPerfMode);
     }
 
-
     if (lowlatency)
     {
         QOMX_ENABLETYPE low_latency;
@@ -632,8 +655,19 @@ OMX_ERRORTYPE omx_venc::component_init(OMX_STRING role)
             DEBUG_PRINT_ERROR("Failed enabling low latency mode");
         }
     }
-
     DEBUG_PRINT_INFO("Component_init : %s : return = 0x%x", m_nkind, eRet);
+
+    {
+        VendorExtensionStore *extStore = const_cast<VendorExtensionStore *>(&mVendorExtensionStore);
+        init_vendor_extensions(*extStore);
+        mVendorExtensionStore.dumpExtensions((const char *)m_nkind);
+    }
+
+    return eRet;
+init_error:
+    handle->venc_close();
+    delete handle;
+    handle = NULL;
     return eRet;
 }
 
@@ -730,7 +764,7 @@ OMX_ERRORTYPE  omx_venc::set_parameter(OMX_IN OMX_HANDLETYPE     hComp,
                     if (portDefn->format.video.eColorFormat ==
                             (OMX_COLOR_FORMATTYPE)QOMX_COLOR_FormatAndroidOpaque) {
                         m_sInPortDef.format.video.eColorFormat = (OMX_COLOR_FORMATTYPE)
-                            QOMX_COLOR_FORMATYUV420PackedSemiPlanar32m;
+                            QOMX_DEFAULT_COLOR_FMT;
                         if (!mUseProxyColorFormat) {
                             if (!c2d_conv.init()) {
                                 DEBUG_PRINT_ERROR("C2D init failed");
@@ -781,9 +815,7 @@ OMX_ERRORTYPE  omx_venc::set_parameter(OMX_IN OMX_HANDLETYPE     hComp,
                         DEBUG_PRINT_ERROR("ERROR: venc_set_param output failed");
                         return OMX_ErrorUnsupportedSetting;
                     }
-
-                    memcpy(&m_sOutPortDef, portDefn, sizeof(struct OMX_PARAM_PORTDEFINITIONTYPE));
-
+                    memcpy(&m_sOutPortDef,portDefn,sizeof(struct OMX_PARAM_PORTDEFINITIONTYPE));
 #ifdef _MSM8974_
                     /*Query ouput Buffer Requirements*/
                     dev_get_buf_req(&m_sOutPortDef.nBufferCountMin,
@@ -791,7 +823,6 @@ OMX_ERRORTYPE  omx_venc::set_parameter(OMX_IN OMX_HANDLETYPE     hComp,
                             &m_sOutPortDef.nBufferSize,
                             m_sOutPortDef.nPortIndex);
 #endif
-
                     update_profile_level(); //framerate , bitrate
 
                     DEBUG_PRINT_LOW("o/p previous actual cnt = %u", (unsigned int)m_sOutPortDef.nBufferCountActual);
@@ -829,7 +860,7 @@ OMX_ERRORTYPE  omx_venc::set_parameter(OMX_IN OMX_HANDLETYPE     hComp,
                     if (portFmt->eColorFormat ==
                             (OMX_COLOR_FORMATTYPE)QOMX_COLOR_FormatAndroidOpaque) {
                         m_sInPortFormat.eColorFormat = (OMX_COLOR_FORMATTYPE)
-                            QOMX_COLOR_FORMATYUV420PackedSemiPlanar32m;
+                            QOMX_DEFAULT_COLOR_FMT;
                         if (!mUseProxyColorFormat) {
                             if (!c2d_conv.init()) {
                                 DEBUG_PRINT_ERROR("C2D init failed");
@@ -874,6 +905,11 @@ OMX_ERRORTYPE  omx_venc::set_parameter(OMX_IN OMX_HANDLETYPE     hComp,
                 m_sConfigBitrate.nEncodeBitrate = pParam->nTargetBitrate;
                 m_sInPortDef.format.video.nBitrate = pParam->nTargetBitrate;
                 m_sOutPortDef.format.video.nBitrate = pParam->nTargetBitrate;
+                /* RC mode chan chage buffer requirements on Input port */
+                dev_get_buf_req(&m_sInPortDef.nBufferCountMin,
+                        &m_sInPortDef.nBufferCountActual,
+                        &m_sInPortDef.nBufferSize,
+                        m_sInPortDef.nPortIndex);
                 DEBUG_PRINT_LOW("bitrate = %u", (unsigned int)m_sOutPortDef.format.video.nBitrate);
                 break;
             }
@@ -885,23 +921,13 @@ OMX_ERRORTYPE  omx_venc::set_parameter(OMX_IN OMX_HANDLETYPE     hComp,
                 memcpy(&mp4_param, pParam, sizeof(struct OMX_VIDEO_PARAM_MPEG4TYPE));
                 DEBUG_PRINT_LOW("set_parameter: OMX_IndexParamVideoMpeg4");
                 if (pParam->eProfile == OMX_VIDEO_MPEG4ProfileAdvancedSimple) {
-#ifdef MAX_RES_1080P
-                    if (pParam->nBFrames) {
-                        DEBUG_PRINT_HIGH("INFO: Only 1 Bframe is supported");
-                        mp4_param.nBFrames = 1;
-                    }
-#else
-                    if (pParam->nBFrames) {
-                        DEBUG_PRINT_ERROR("Warning: B frames not supported");
-                        mp4_param.nBFrames = 0;
-                    }
-#endif
 #ifdef _MSM8974_
                     if (pParam->nBFrames || bframes)
-                        mp4_param.nBFrames = (pParam->nBFrames > (unsigned int) bframes)? pParam->nBFrames : bframes;
+                        mp4_param.nBFrames = 1;
+                    else
+                        mp4_param.nBFrames = 0;
                     DEBUG_PRINT_HIGH("MPEG4: %u BFrames are being set", (unsigned int)mp4_param.nBFrames);
 #endif
-
                 } else {
                     if (pParam->nBFrames) {
                         DEBUG_PRINT_ERROR("Warning: B frames not supported");
@@ -939,47 +965,31 @@ OMX_ERRORTYPE  omx_venc::set_parameter(OMX_IN OMX_HANDLETYPE     hComp,
                 memcpy(&avc_param, pParam, sizeof( struct OMX_VIDEO_PARAM_AVCTYPE));
                 DEBUG_PRINT_LOW("set_parameter: OMX_IndexParamVideoAvc");
 
+                avc_param.nBFrames = 0;
                 if ((pParam->eProfile == OMX_VIDEO_AVCProfileHigh)||
                         (pParam->eProfile == OMX_VIDEO_AVCProfileMain)) {
-#ifdef MAX_RES_1080P
-                    if (pParam->nBFrames) {
-                        DEBUG_PRINT_HIGH("INFO: Only 1 Bframe is supported");
-                        avc_param.nBFrames = 1;
-                    }
-                    if (pParam->nRefFrames != 2) {
-                        DEBUG_PRINT_ERROR("Warning: 2 RefFrames are needed, changing RefFrames from %u to 2", (unsigned int)pParam->nRefFrames);
-                        avc_param.nRefFrames = 2;
-                    }
-#else
-                    if (pParam->nBFrames) {
-                        DEBUG_PRINT_ERROR("Warning: B frames not supported");
-                        avc_param.nBFrames = 0;
-                    }
-                    if (pParam->nRefFrames != 1) {
-                        DEBUG_PRINT_ERROR("Warning: Only 1 RefFrame is supported, changing RefFrame from %u to 1)", (unsigned int)pParam->nRefFrames);
-                        avc_param.nRefFrames = 1;
-                    }
-#endif
-#ifdef _MSM8974_
-                    if (pParam->nBFrames || bframes) {
-                        avc_param.nBFrames = (pParam->nBFrames > (unsigned int) bframes)? pParam->nBFrames : bframes;
-                        avc_param.nRefFrames = (avc_param.nBFrames < 4)? avc_param.nBFrames + 1 : 4;
-                    }
-                    DEBUG_PRINT_HIGH("AVC: RefFrames: %u, BFrames: %u", (unsigned int)avc_param.nRefFrames, (unsigned int)avc_param.nBFrames);
 
+                    if (pParam->nBFrames) {
+                        avc_param.nBFrames = pParam->nBFrames;
+                        DEBUG_PRINT_LOW("B frames set using Client setparam to %d",
+                            avc_param.nBFrames);
+                    }
+
+                    if (bframes ) {
+                        avc_param.nBFrames = bframes;
+                        DEBUG_PRINT_LOW("B frames set using setprop to %d",
+                            avc_param.nBFrames);
+                    }
+
+                    DEBUG_PRINT_HIGH("AVC: BFrames: %u", (unsigned int)avc_param.nBFrames);
                     avc_param.bEntropyCodingCABAC = (OMX_BOOL)(avc_param.bEntropyCodingCABAC && entropy);
                     avc_param.nCabacInitIdc = entropy ? avc_param.nCabacInitIdc : 0;
-#endif
                 } else {
-                    if (pParam->nRefFrames != 1) {
-                        DEBUG_PRINT_ERROR("Warning: Only 1 RefFrame is supported, changing RefFrame from %u to 1)", (unsigned int)pParam->nRefFrames);
-                        avc_param.nRefFrames = 1;
-                    }
                     if (pParam->nBFrames) {
                         DEBUG_PRINT_ERROR("Warning: B frames not supported");
-                        avc_param.nBFrames = 0;
                     }
                 }
+
                 if (handle->venc_set_param(&avc_param,OMX_IndexParamVideoAvc) != true) {
                     return OMX_ErrorUnsupportedSetting;
                 }
@@ -1193,11 +1203,11 @@ OMX_ERRORTYPE  omx_venc::set_parameter(OMX_IN OMX_HANDLETYPE     hComp,
                 AllocateNativeHandleParams* allocateNativeHandleParams = (AllocateNativeHandleParams *) paramData;
 
                 if (!secure_session) {
-                    DEBUG_PRINT_ERROR("Enable/Disable allocate-native-handle allowed only in secure session");
+                    DEBUG_PRINT_HIGH("Enable/Disable allocate-native-handle allowed only in secure session");
                     eRet = OMX_ErrorUnsupportedSetting;
                     break;
                 } else if (allocateNativeHandleParams->nPortIndex != PORT_INDEX_OUT) {
-                    DEBUG_PRINT_ERROR("Enable/Disable allocate-native-handle allowed only on Output port!");
+                    DEBUG_PRINT_HIGH("Enable/Disable allocate-native-handle allowed only on Output port!");
                     eRet = OMX_ErrorUnsupportedSetting;
                     break;
                 } else if (m_out_mem_ptr) {
@@ -1249,6 +1259,28 @@ OMX_ERRORTYPE  omx_venc::set_parameter(OMX_IN OMX_HANDLETYPE     hComp,
                 break;
             }
 
+        case OMX_QcomIndexParamVideoIPBQPRange:
+            {
+                DEBUG_PRINT_LOW("set_parameter: OMX_QCOM_VIDEO_PARAM_IPB_QPRANGETYPE");
+                OMX_QCOM_VIDEO_PARAM_IPB_QPRANGETYPE *qp_range = (OMX_QCOM_VIDEO_PARAM_IPB_QPRANGETYPE*) paramData;
+                if (qp_range->nPortIndex == PORT_INDEX_OUT) {
+                    if (handle->venc_set_param(paramData,
+                                (OMX_INDEXTYPE)OMX_QcomIndexParamVideoIPBQPRange) != true) {
+                        return OMX_ErrorUnsupportedSetting;
+                    }
+                    m_sSessionIPBQPRange.minIQP = qp_range->minIQP;
+                    m_sSessionIPBQPRange.maxIQP = qp_range->maxIQP;
+                    m_sSessionIPBQPRange.minPQP = qp_range->minPQP;
+                    m_sSessionIPBQPRange.maxPQP = qp_range->maxPQP;
+                    m_sSessionIPBQPRange.minBQP = qp_range->minBQP;
+                    m_sSessionIPBQPRange.maxBQP = qp_range->maxBQP;
+                } else {
+                    DEBUG_PRINT_ERROR("Unsupported port Index for IPB QP range setting");
+                    eRet = OMX_ErrorBadPortIndex;
+                }
+                break;
+            }
+
         case OMX_QcomIndexPortDefn:
             {
                 VALIDATE_OMX_PARAM_DATA(paramData, OMX_QCOM_PARAM_PORTDEFINITIONTYPE);
@@ -1287,6 +1319,19 @@ OMX_ERRORTYPE  omx_venc::set_parameter(OMX_IN OMX_HANDLETYPE     hComp,
                     return OMX_ErrorUnsupportedSetting;
                 }
                 memcpy(&m_sErrorCorrection,pParam, sizeof(m_sErrorCorrection));
+                break;
+            }
+        case OMX_QcomIndexParamVideoSliceSpacing:
+            {
+                VALIDATE_OMX_PARAM_DATA(paramData, QOMX_VIDEO_PARAM_SLICE_SPACING_TYPE);
+                DEBUG_PRINT_LOW("OMX_QcomIndexParamVideoSliceSpacing");
+                QOMX_VIDEO_PARAM_SLICE_SPACING_TYPE* pParam =
+                    (QOMX_VIDEO_PARAM_SLICE_SPACING_TYPE*)paramData;
+                if (!handle->venc_set_param(paramData, (OMX_INDEXTYPE)OMX_QcomIndexParamVideoSliceSpacing)) {
+                    DEBUG_PRINT_ERROR("ERROR: Request for setting slice spacing failed");
+                    return OMX_ErrorUnsupportedSetting;
+                }
+                memcpy(&m_sSliceSpacing, pParam, sizeof(m_sSliceSpacing));
                 break;
             }
         case OMX_IndexParamVideoIntraRefresh:
@@ -1337,7 +1382,7 @@ OMX_ERRORTYPE  omx_venc::set_parameter(OMX_IN OMX_HANDLETYPE     hComp,
                             "valid for input port only in secure session");
                             return OMX_ErrorUnsupportedSetting;
                 } else {
-                    DEBUG_PRINT_ERROR("set_parameter: metamode is "
+                    DEBUG_PRINT_HIGH("set_parameter: metamode is "
                             "valid for input port only");
                     eRet = OMX_ErrorUnsupportedIndex;
                 }
@@ -1355,7 +1400,7 @@ OMX_ERRORTYPE  omx_venc::set_parameter(OMX_IN OMX_HANDLETYPE     hComp,
 
                 if (pParam->nIndex == (OMX_INDEXTYPE)OMX_ExtraDataVideoEncoderSliceInfo) {
                     if (pParam->nPortIndex == PORT_INDEX_OUT) {
-                        mask = VEN_EXTRADATA_SLICEINFO;
+                        mask = VENC_EXTRADATA_SLICEINFO;
 
                         DEBUG_PRINT_HIGH("SliceInfo extradata %s",
                                 ((pParam->bEnabled == OMX_TRUE) ? "enabled" : "disabled"));
@@ -1367,7 +1412,7 @@ OMX_ERRORTYPE  omx_venc::set_parameter(OMX_IN OMX_HANDLETYPE     hComp,
                     }
                 } else if (pParam->nIndex == (OMX_INDEXTYPE)OMX_ExtraDataVideoEncoderMBInfo) {
                     if (pParam->nPortIndex == PORT_INDEX_OUT) {
-                        mask = VEN_EXTRADATA_MBINFO;
+                        mask = VENC_EXTRADATA_MBINFO;
 
                         DEBUG_PRINT_HIGH("MBInfo extradata %s",
                                 ((pParam->bEnabled == OMX_TRUE) ? "enabled" : "disabled"));
@@ -1377,8 +1422,29 @@ OMX_ERRORTYPE  omx_venc::set_parameter(OMX_IN OMX_HANDLETYPE     hComp,
                         eRet = OMX_ErrorUnsupportedIndex;
                         break;
                     }
+                } else if (pParam->nIndex == (OMX_INDEXTYPE)OMX_ExtraDataFrameDimension) {
+                    if (pParam->nPortIndex == PORT_INDEX_IN) {
+                            mask = VENC_EXTRADATA_FRAMEDIMENSION;
+                        DEBUG_PRINT_HIGH("Frame dimension extradata %s",
+                                ((pParam->bEnabled == OMX_TRUE) ? "enabled" : "disabled"));
+                    } else {
+                        DEBUG_PRINT_ERROR("set_parameter: Frame Dimension is "
+                                "valid for input port only");
+                        eRet = OMX_ErrorUnsupportedIndex;
+                        break;
+                    }
+                } else if (pParam->nIndex == (OMX_INDEXTYPE)OMX_QTIIndexParamVQZipSEIExtraData) {
+                    if (pParam->nPortIndex == PORT_INDEX_IN) {
+                        mask = VENC_EXTRADATA_VQZIP;
+                        DEBUG_PRINT_HIGH("VQZIP extradata %s",
+                                ((pParam->bEnabled == OMX_TRUE) ? "enabled" : "disabled"));
+                    } else {
+                        DEBUG_PRINT_ERROR("set_parameter: VQZIP is "
+                                "valid for input port only");
+                        eRet = OMX_ErrorUnsupportedIndex;
+                        break;
+                    }
                 }
-#ifndef _MSM8974_
                 else if (pParam->nIndex == (OMX_INDEXTYPE)OMX_ExtraDataVideoLTRInfo) {
                     if (pParam->nPortIndex == PORT_INDEX_OUT) {
                         if (pParam->bEnabled == OMX_TRUE)
@@ -1393,7 +1459,6 @@ OMX_ERRORTYPE  omx_venc::set_parameter(OMX_IN OMX_HANDLETYPE     hComp,
                         break;
                     }
                 }
-#endif
                 else {
                     DEBUG_PRINT_ERROR("set_parameter: unsupported extrdata index (%x)",
                             pParam->nIndex);
@@ -1412,6 +1477,20 @@ OMX_ERRORTYPE  omx_venc::set_parameter(OMX_IN OMX_HANDLETYPE     hComp,
                             (OMX_INDEXTYPE)pParam->nIndex) != true) {
                     DEBUG_PRINT_ERROR("ERROR: Setting Extradata (%x) failed", pParam->nIndex);
                     return OMX_ErrorUnsupportedSetting;
+                }
+
+                if (pParam->nPortIndex == PORT_INDEX_IN) {
+                    m_sInPortDef.nPortIndex = PORT_INDEX_IN;
+                    dev_get_buf_req(&m_sInPortDef.nBufferCountMin,
+                            &m_sInPortDef.nBufferCountActual,
+                            &m_sInPortDef.nBufferSize,
+                            m_sInPortDef.nPortIndex);
+                    DEBUG_PRINT_HIGH("updated in_buf_req: buffer cnt=%u, "
+                            "count min=%u, buffer size=%u",
+                            (unsigned int)m_sOutPortDef.nBufferCountActual,
+                            (unsigned int)m_sOutPortDef.nBufferCountMin,
+                            (unsigned int)m_sOutPortDef.nBufferSize);
+
                 } else {
                     m_sOutPortDef.nPortIndex = PORT_INDEX_OUT;
                     dev_get_buf_req(&m_sOutPortDef.nBufferCountMin,
@@ -1517,15 +1596,16 @@ OMX_ERRORTYPE  omx_venc::set_parameter(OMX_IN OMX_HANDLETYPE     hComp,
                             "request for inband sps/pps failed.");
                     return OMX_ErrorUnsupportedSetting;
                 }
+                memcpy(&m_sPrependSPSPPS, paramData, sizeof(m_sPrependSPSPPS));
                 break;
             }
-        case OMX_QcomIndexParamH264AUDelimiter:
+        case OMX_QcomIndexParamAUDelimiter:
             {
-                VALIDATE_OMX_PARAM_DATA(paramData, OMX_QCOM_VIDEO_CONFIG_H264_AUD);
+                VALIDATE_OMX_PARAM_DATA(paramData, OMX_QCOM_VIDEO_CONFIG_AUD);
                 if(!handle->venc_set_param(paramData,
-                            (OMX_INDEXTYPE)OMX_QcomIndexParamH264AUDelimiter)) {
+                            (OMX_INDEXTYPE)OMX_QcomIndexParamAUDelimiter)) {
                     DEBUG_PRINT_ERROR("%s: %s",
-                            "OMX_QComIndexParamh264AUDelimiter:",
+                            "OMX_QComIndexParamAUDelimiter:",
                             "request for AU Delimiters failed.");
                     return OMX_ErrorUnsupportedSetting;
                 }
@@ -1533,6 +1613,7 @@ OMX_ERRORTYPE  omx_venc::set_parameter(OMX_IN OMX_HANDLETYPE     hComp,
             }
         case OMX_QcomIndexParamMBIStatisticsMode:
             {
+                VALIDATE_OMX_PARAM_DATA(paramData, OMX_QOMX_VIDEO_MBI_STATISTICS);
                 if(!handle->venc_set_param(paramData,
                             (OMX_INDEXTYPE)OMX_QcomIndexParamMBIStatisticsMode)) {
                     DEBUG_PRINT_ERROR("%s: %s",
@@ -1618,11 +1699,64 @@ OMX_ERRORTYPE  omx_venc::set_parameter(OMX_IN OMX_HANDLETYPE     hComp,
             }
         case OMX_QcomIndexParamVideoHybridHierpMode:
             {
+                VALIDATE_OMX_PARAM_DATA(paramData, QOMX_EXTNINDEX_VIDEO_HYBRID_HP_MODE);
                if(!handle->venc_set_param(paramData,
                          (OMX_INDEXTYPE)OMX_QcomIndexParamVideoHybridHierpMode)) {
                    DEBUG_PRINT_ERROR("Request to Enable Hybrid Hier-P failed");
                    return OMX_ErrorUnsupportedSetting;
                 }
+                break;
+            }
+        case OMX_QcomIndexParamBatchSize:
+            {
+                VALIDATE_OMX_PARAM_DATA(paramData, OMX_PARAM_U32TYPE);
+                if(!handle->venc_set_param(paramData,
+                         (OMX_INDEXTYPE)OMX_QcomIndexParamBatchSize)) {
+                   DEBUG_PRINT_ERROR("Attempting to set batch size failed");
+                   return OMX_ErrorUnsupportedSetting;
+                }
+                break;
+            }
+        case OMX_QcomIndexConfigH264EntropyCodingCabac:
+            {
+                VALIDATE_OMX_PARAM_DATA(paramData, QOMX_VIDEO_H264ENTROPYCODINGTYPE);
+                if(!handle->venc_set_param(paramData,
+                         (OMX_INDEXTYPE)OMX_QcomIndexConfigH264EntropyCodingCabac)) {
+                   DEBUG_PRINT_ERROR("Attempting to set Entropy failed");
+                   return OMX_ErrorUnsupportedSetting;
+                }
+               break;
+            }
+        case OMX_QTIIndexParamVQZIPSEIType:
+            {
+                VALIDATE_OMX_PARAM_DATA(paramData, OMX_QTI_VIDEO_PARAM_VQZIP_SEI_TYPE);
+                if (!handle->venc_set_param(paramData,
+                            (OMX_INDEXTYPE) OMX_QTIIndexParamVQZIPSEIType)) {
+                    DEBUG_PRINT_ERROR("ERROR: Setting VQZIP SEI type");
+                    return OMX_ErrorUnsupportedSetting;
+                }
+                m_sExtraData |= VENC_EXTRADATA_VQZIP;
+                break;
+            }
+        case OMX_QcomIndexParamVencAspectRatio:
+            {
+                VALIDATE_OMX_PARAM_DATA(paramData, QOMX_EXTNINDEX_VIDEO_VENC_SAR);
+                if (!handle->venc_set_param(paramData,
+                        (OMX_INDEXTYPE)OMX_QcomIndexParamVencAspectRatio)) {
+                    DEBUG_PRINT_ERROR("ERROR: Setting OMX_QcomIndexParamVencAspectRatio failed");
+                    return OMX_ErrorUnsupportedSetting;
+                }
+                memcpy(&m_sSar, paramData, sizeof(m_sSar));
+                break;
+            }
+        case OMX_QTIIndexParamLowLatencyMode:
+            {
+                if (!handle->venc_set_param(paramData,
+                        (OMX_INDEXTYPE)OMX_QTIIndexParamLowLatencyMode)) {
+                    DEBUG_PRINT_ERROR("ERROR: Setting OMX_QTIIndexParamLowLatencyMode failed");
+                    return OMX_ErrorUnsupportedSetting;
+                }
+                memcpy(&m_slowLatencyMode, paramData, sizeof(m_slowLatencyMode));
                 break;
             }
         case OMX_QcomIndexConfigVideoVencLowLatencyMode:
@@ -1632,6 +1766,43 @@ OMX_ERRORTYPE  omx_venc::set_parameter(OMX_IN OMX_HANDLETYPE     hComp,
                     DEBUG_PRINT_ERROR("Request to Enable Low latency mode failed");
                     return OMX_ErrorUnsupportedSetting;
                 }
+                break;
+            }
+        case OMX_QTIIndexParamVideoEnableRoiInfo:
+            {
+                if (!handle->venc_set_param(paramData,
+                            (OMX_INDEXTYPE)OMX_QTIIndexParamVideoEnableRoiInfo)) {
+                    DEBUG_PRINT_ERROR("ERROR: Setting OMX_QTIIndexParamVideoEnableRoiInfo failed");
+                    return OMX_ErrorUnsupportedSetting;
+                }
+                m_sExtraData |= VENC_EXTRADATA_ROI;
+                break;
+            }
+        case OMX_IndexParamAndroidVideoTemporalLayering:
+            {
+                VALIDATE_OMX_PARAM_DATA(paramData, OMX_VIDEO_PARAM_ANDROID_TEMPORALLAYERINGTYPE);
+                if (!handle->venc_set_param(paramData,
+                        (OMX_INDEXTYPE)OMX_IndexParamAndroidVideoTemporalLayering)) {
+                    DEBUG_PRINT_ERROR("Failed to configure temporal layers");
+                    return OMX_ErrorUnsupportedSetting;
+                }
+                // save the actual configuration applied
+                memcpy(&m_sParamTemporalLayers, paramData, sizeof(m_sParamTemporalLayers));
+                // keep the config data in sync
+                m_sConfigTemporalLayers.ePattern = m_sParamTemporalLayers.ePattern;
+                m_sConfigTemporalLayers.nBLayerCountActual = m_sParamTemporalLayers.nBLayerCountActual;
+                m_sConfigTemporalLayers.nPLayerCountActual = m_sParamTemporalLayers.nPLayerCountActual;
+                m_sConfigTemporalLayers.bBitrateRatiosSpecified = m_sParamTemporalLayers.bBitrateRatiosSpecified;
+                memcpy(&m_sConfigTemporalLayers.nBitrateRatios[0],
+                        &m_sParamTemporalLayers.nBitrateRatios[0],
+                        OMX_VIDEO_ANDROID_MAXTEMPORALLAYERS * sizeof(OMX_U32));
+                break;
+            }
+        case OMX_QTIIndexParamDisablePQ:
+            {
+                VALIDATE_OMX_PARAM_DATA(paramData, QOMX_DISABLETYPE);
+                handle->venc_set_param(paramData,
+                        (OMX_INDEXTYPE)OMX_QTIIndexParamDisablePQ);
                 break;
             }
         case OMX_QTIIndexParamIframeSizeType:
@@ -1644,7 +1815,23 @@ OMX_ERRORTYPE  omx_venc::set_parameter(OMX_IN OMX_HANDLETYPE     hComp,
                 }
                 break;
             }
-        case OMX_IndexParamVideoSliceFMO:
+        case OMX_QTIIndexParamEnableAVTimerTimestamps:
+            {
+                VALIDATE_OMX_PARAM_DATA(paramData, QOMX_ENABLETYPE);
+                if (!handle->venc_set_param(paramData,
+                            (OMX_INDEXTYPE)OMX_QTIIndexParamEnableAVTimerTimestamps)) {
+                    DEBUG_PRINT_ERROR("ERROR: Setting OMX_QTIIndexParamEnableAVTimerTimestamps failed");
+                    return OMX_ErrorUnsupportedSetting;
+                }
+                memcpy(&m_sParamAVTimerTimestampMode, paramData, sizeof(QOMX_ENABLETYPE));
+                break;
+            }
+        case OMX_QcomIndexParamVencControlInputQueue:
+            {
+                VALIDATE_OMX_PARAM_DATA(paramData, QOMX_ENABLETYPE);
+                memcpy(&m_sParamControlInputQueue, paramData, sizeof(QOMX_ENABLETYPE));
+                break;
+            }
         default:
             {
                 DEBUG_PRINT_ERROR("ERROR: Setparameter: unknown param %d", paramIndex);
@@ -1777,6 +1964,14 @@ OMX_ERRORTYPE  omx_venc::set_config(OMX_IN OMX_HANDLETYPE      hComp,
                     m_sConfigFramerate.xEncodeFramerate = pParam->xEncodeFramerate;
                     m_sOutPortDef.format.video.xFramerate = pParam->xEncodeFramerate;
                     m_sOutPortFormat.xFramerate = pParam->xEncodeFramerate;
+                    /*
+                     * Frame rate can change buffer requirements. If query is not allowed,
+                     * failure is not FATAL here.
+                     */
+                    dev_get_buf_req(&m_sInPortDef.nBufferCountMin,
+                            &m_sInPortDef.nBufferCountActual,
+                            &m_sInPortDef.nBufferSize,
+                            m_sInPortDef.nPortIndex);
                 } else {
                     DEBUG_PRINT_ERROR("ERROR: Unsupported port index: %u", (unsigned int)pParam->nPortIndex);
                     return OMX_ErrorBadPortIndex;
@@ -1804,10 +1999,6 @@ OMX_ERRORTYPE  omx_venc::set_config(OMX_IN OMX_HANDLETYPE      hComp,
                     if (m_sIntraperiod.nBFrames != pParam->nBFrames) {
                         if(hier_b_enabled && m_state == OMX_StateLoaded) {
                             DEBUG_PRINT_INFO("B-frames setting is supported if HierB is enabled");
-                        }
-                        else {
-                            DEBUG_PRINT_HIGH("Dynamically changing B-frames not supported");
-                            return OMX_ErrorUnsupportedSetting;
                         }
                     }
                     if (handle->venc_set_config(configData, (OMX_INDEXTYPE) QOMX_IndexConfigVideoIntraperiod) != true) {
@@ -1887,26 +2078,23 @@ OMX_ERRORTYPE  omx_venc::set_config(OMX_IN OMX_HANDLETYPE      hComp,
                 nRotation = pParam->nRotation - m_sConfigFrameRotation.nRotation;
                 if (nRotation < 0)
                     nRotation = -nRotation;
-                if (nRotation == 90 || nRotation == 270) {
-                    DEBUG_PRINT_HIGH("set_config: updating device Dims");
-                    if (handle->venc_set_config(configData,
-                                OMX_IndexConfigCommonRotate) != true) {
+
+                DEBUG_PRINT_HIGH("set_config: updating device Dims");
+
+                if (handle->venc_set_config(configData,
+                    OMX_IndexConfigCommonRotate) != true) {
                         DEBUG_PRINT_ERROR("ERROR: Set OMX_IndexConfigCommonRotate failed");
                         return OMX_ErrorUnsupportedSetting;
-                    } else {
-                        OMX_U32 nFrameWidth;
-                        OMX_U32 nFrameHeight;
+                }
+                m_sConfigFrameRotation.nRotation = pParam->nRotation;
 
-                        DEBUG_PRINT_HIGH("set_config: updating port Dims");
-
-                        nFrameWidth = m_sOutPortDef.format.video.nFrameWidth;
-                        nFrameHeight = m_sOutPortDef.format.video.nFrameHeight;
-                        m_sOutPortDef.format.video.nFrameWidth  = nFrameHeight;
-                        m_sOutPortDef.format.video.nFrameHeight = nFrameWidth;
-                        m_sConfigFrameRotation.nRotation = pParam->nRotation;
-                    }
-                } else {
-                    m_sConfigFrameRotation.nRotation = pParam->nRotation;
+                // Update output-port resolution (since it might have been flipped by rotation)
+                if (handle->venc_get_dimensions(PORT_INDEX_OUT,
+                        &m_sOutPortDef.format.video.nFrameWidth,
+                        &m_sOutPortDef.format.video.nFrameHeight)) {
+                    DEBUG_PRINT_HIGH("set Rotation: updated dimensions = %u x %u",
+                            m_sOutPortDef.format.video.nFrameWidth,
+                            m_sOutPortDef.format.video.nFrameHeight);
                 }
                 break;
             }
@@ -2002,6 +2190,42 @@ OMX_ERRORTYPE  omx_venc::set_config(OMX_IN OMX_HANDLETYPE      hComp,
                 }
                 break;
             }
+        case OMX_QcomIndexConfigNumHierPLayers:
+        {
+            VALIDATE_OMX_PARAM_DATA(configData, QOMX_EXTNINDEX_VIDEO_HIER_P_LAYERS);
+            QOMX_EXTNINDEX_VIDEO_HIER_P_LAYERS* pParam =
+                (QOMX_EXTNINDEX_VIDEO_HIER_P_LAYERS*)configData;
+            if (!handle->venc_set_config(pParam, (OMX_INDEXTYPE)OMX_QcomIndexConfigNumHierPLayers)) {
+                DEBUG_PRINT_ERROR("ERROR: Setting OMX_QcomIndexConfigNumHierPLayers failed");
+                return OMX_ErrorUnsupportedSetting;
+            }
+            memcpy(&m_sHPlayers, pParam, sizeof(m_sHPlayers));
+            break;
+        }
+        case OMX_QcomIndexConfigBaseLayerId:
+        {
+            VALIDATE_OMX_PARAM_DATA(configData, OMX_SKYPE_VIDEO_CONFIG_BASELAYERPID);
+            OMX_SKYPE_VIDEO_CONFIG_BASELAYERPID* pParam =
+                (OMX_SKYPE_VIDEO_CONFIG_BASELAYERPID*) configData;
+            if (!handle->venc_set_config(pParam, (OMX_INDEXTYPE)OMX_QcomIndexConfigBaseLayerId)) {
+                DEBUG_PRINT_ERROR("ERROR: Setting OMX_QcomIndexConfigBaseLayerId failed");
+                return OMX_ErrorUnsupportedSetting;
+            }
+            memcpy(&m_sBaseLayerID, pParam, sizeof(m_sBaseLayerID));
+            break;
+        }
+        case OMX_QcomIndexConfigQp:
+        {
+            VALIDATE_OMX_PARAM_DATA(configData, OMX_SKYPE_VIDEO_CONFIG_QP);
+            OMX_SKYPE_VIDEO_CONFIG_QP* pParam =
+                (OMX_SKYPE_VIDEO_CONFIG_QP*) configData;
+            if (!handle->venc_set_config(pParam, (OMX_INDEXTYPE)OMX_QcomIndexConfigQp)) {
+                DEBUG_PRINT_ERROR("ERROR: Setting OMX_QcomIndexConfigQp failed");
+                return OMX_ErrorUnsupportedSetting;
+            }
+            memcpy(&m_sConfigQP, pParam, sizeof(m_sConfigQP));
+            break;
+        }
         case OMX_IndexConfigPriority:
             {
                 VALIDATE_OMX_PARAM_DATA(configData, OMX_PARAM_U32TYPE);
@@ -2021,34 +2245,41 @@ OMX_ERRORTYPE  omx_venc::set_config(OMX_IN OMX_HANDLETYPE      hComp,
                 }
                 break;
             }
-        case OMX_QcomIndexConfigMaxHierPLayers:
+        case OMX_QTIIndexConfigVideoRoiInfo:
             {
-                QOMX_EXTNINDEX_VIDEO_MAX_HIER_P_LAYERS* pParam =
-                    (QOMX_EXTNINDEX_VIDEO_MAX_HIER_P_LAYERS*)configData;
-                if (!handle->venc_set_config(pParam, (OMX_INDEXTYPE)OMX_QcomIndexConfigMaxHierPLayers)) {
-                    DEBUG_PRINT_ERROR("ERROR: Setting OMX_QcomIndexConfigMaxHierPLayers failed");
+                VALIDATE_OMX_PARAM_DATA(configData, OMX_QTI_VIDEO_CONFIG_ROIINFO);
+                if (!handle->venc_set_config(configData, (OMX_INDEXTYPE)OMX_QTIIndexConfigVideoRoiInfo)) {
+                    DEBUG_PRINT_ERROR("Failed to set OMX_QTIIndexConfigVideoRoiInfo");
                     return OMX_ErrorUnsupportedSetting;
                 }
-                memcpy(&m_sMaxHPlayers, pParam, sizeof(m_sMaxHPlayers));
                 break;
             }
-        case OMX_QTIIndexConfigDescribeColorAspects:
-           {
-               VALIDATE_OMX_PARAM_DATA(configData, DescribeColorAspectsParams);
-               DescribeColorAspectsParams *params = (DescribeColorAspectsParams *)configData;
-               print_debug_color_aspects(&(params->sAspects), "set_config");
-               if (!handle->venc_set_config(configData, (OMX_INDEXTYPE)OMX_QTIIndexConfigDescribeColorAspects)) {
-                   DEBUG_PRINT_ERROR("Failed to set OMX_QTIIndexConfigDescribeColorAspects");
-                   return OMX_ErrorUnsupportedSetting;
-               }
-               memcpy(&m_sConfigColorAspects, configData, sizeof(m_sConfigColorAspects));
-               break;
-           }
+        case OMX_IndexConfigTimePosition:
+            {
+                OMX_TIME_CONFIG_TIMESTAMPTYPE* pParam =
+                    (OMX_TIME_CONFIG_TIMESTAMPTYPE*) configData;
+                unsigned long buf;
+                unsigned long p2;
+                unsigned long bufTime;
+
+                pthread_mutex_lock(&m_TimeStampInfo.m_lock);
+                m_TimeStampInfo.ts = (OMX_S64)pParam->nTimestamp;
+                    while (m_TimeStampInfo.deferred_inbufq.m_size &&
+                          !(m_TimeStampInfo.deferred_inbufq.get_q_msg_type() > m_TimeStampInfo.ts)) {
+                        m_TimeStampInfo.deferred_inbufq.pop_entry(&buf,&p2,&bufTime);
+                        DEBUG_PRINT_INFO("Queueing back pending buffer %lu timestamp %lu", buf, bufTime);
+                        this->post_event((unsigned long)hComp, (unsigned long)buf, m_input_msg_id);
+                   }
+                pthread_mutex_unlock(&m_TimeStampInfo.m_lock);
+                memcpy(&m_sConfigInputTrigTS, pParam, sizeof(m_sConfigInputTrigTS));
+                break;
+            }
 #ifdef SUPPORT_CONFIG_INTRA_REFRESH
        case OMX_IndexConfigAndroidIntraRefresh:
            {
-            OMX_VIDEO_CONFIG_ANDROID_INTRAREFRESHTYPE* pParam =
-                (OMX_VIDEO_CONFIG_ANDROID_INTRAREFRESHTYPE*) configData;
+                VALIDATE_OMX_PARAM_DATA(configData, OMX_VIDEO_CONFIG_ANDROID_INTRAREFRESHTYPE);
+                OMX_VIDEO_CONFIG_ANDROID_INTRAREFRESHTYPE* pParam =
+                    (OMX_VIDEO_CONFIG_ANDROID_INTRAREFRESHTYPE*) configData;
                 if (m_state == OMX_StateLoaded
                         || m_sInPortDef.bEnabled == OMX_FALSE
                         || m_sOutPortDef.bEnabled == OMX_FALSE) {
@@ -2064,6 +2295,80 @@ OMX_ERRORTYPE  omx_venc::set_config(OMX_IN OMX_HANDLETYPE      hComp,
                break;
            }
 #endif
+        case OMX_QTIIndexConfigVideoBlurResolution:
+           {
+                VALIDATE_OMX_PARAM_DATA(configData, OMX_QTI_VIDEO_CONFIG_BLURINFO);
+                OMX_QTI_VIDEO_CONFIG_BLURINFO* pParam =
+                              (OMX_QTI_VIDEO_CONFIG_BLURINFO*) configData;
+                if (!handle->venc_set_config(configData, (OMX_INDEXTYPE)OMX_QTIIndexConfigVideoBlurResolution)) {
+                    DEBUG_PRINT_ERROR("Failed to set OMX_QTIIndexConfigVideoBlurResolution");
+                    return OMX_ErrorUnsupportedSetting;
+                }
+                memcpy(&m_blurInfo, pParam, sizeof(m_blurInfo));
+                break;
+           }
+        case OMX_QcomIndexConfigH264Transform8x8:
+           {
+                if (!handle->venc_set_config(configData, (OMX_INDEXTYPE)OMX_QcomIndexConfigH264Transform8x8)) {
+                    DEBUG_PRINT_ERROR("ERROR: Setting OMX_QcomIndexConfigH264Transform8x8 failed");
+                    return OMX_ErrorUnsupportedSetting;
+                }
+                break;
+            }
+        case OMX_QTIIndexConfigDescribeColorAspects:
+           {
+               VALIDATE_OMX_PARAM_DATA(configData, DescribeColorAspectsParams);
+               DescribeColorAspectsParams *params = (DescribeColorAspectsParams *)configData;
+               print_debug_color_aspects(&(params->sAspects), "set_config");
+               if (!handle->venc_set_config(configData, (OMX_INDEXTYPE)OMX_QTIIndexConfigDescribeColorAspects)) {
+                   DEBUG_PRINT_ERROR("Failed to set OMX_QTIIndexConfigDescribeColorAspects");
+                   return OMX_ErrorUnsupportedSetting;
+               }
+               memcpy(&m_sConfigColorAspects, configData, sizeof(m_sConfigColorAspects));
+               break;
+           }
+        case OMX_IndexConfigAndroidVideoTemporalLayering:
+            {
+                VALIDATE_OMX_PARAM_DATA(configData, OMX_VIDEO_CONFIG_ANDROID_TEMPORALLAYERINGTYPE);
+                OMX_VIDEO_CONFIG_ANDROID_TEMPORALLAYERINGTYPE* pParam =
+                    (OMX_VIDEO_CONFIG_ANDROID_TEMPORALLAYERINGTYPE*)configData;
+                if (!handle->venc_set_config(configData, (OMX_INDEXTYPE)OMX_IndexConfigAndroidVideoTemporalLayering)) {
+                    DEBUG_PRINT_ERROR("ERROR: Setting OMX_IndexConfigAndroidVideoTemporalLayering failed");
+                    return OMX_ErrorUnsupportedSetting;
+                }
+                // save the actual configuration applied
+                memcpy(&m_sConfigTemporalLayers, pParam, sizeof(m_sConfigTemporalLayers));
+                // keep the config data in sync
+                m_sParamTemporalLayers.ePattern = m_sConfigTemporalLayers.ePattern;
+                m_sParamTemporalLayers.nBLayerCountActual = m_sConfigTemporalLayers.nBLayerCountActual;
+                m_sParamTemporalLayers.nPLayerCountActual = m_sConfigTemporalLayers.nPLayerCountActual;
+                m_sParamTemporalLayers.bBitrateRatiosSpecified = m_sConfigTemporalLayers.bBitrateRatiosSpecified;
+                memcpy(&m_sParamTemporalLayers.nBitrateRatios[0],
+                        &m_sConfigTemporalLayers.nBitrateRatios[0],
+                        OMX_VIDEO_ANDROID_MAXTEMPORALLAYERS * sizeof(OMX_U32));
+
+                break;
+            }
+        case OMX_QcomIndexConfigPerfLevel:
+            {
+                VALIDATE_OMX_PARAM_DATA(configData, OMX_QCOM_VIDEO_CONFIG_PERF_LEVEL);
+                if (!handle->venc_set_config(configData,
+                        (OMX_INDEXTYPE)OMX_QcomIndexConfigPerfLevel)) {
+                    DEBUG_PRINT_ERROR("Failed to set perf level");
+                    return OMX_ErrorUnsupportedSetting;
+                }
+            }
+        case OMX_IndexConfigAndroidVendorExtension:
+            {
+                VALIDATE_OMX_PARAM_DATA(configData, OMX_CONFIG_ANDROID_VENDOR_EXTENSIONTYPE);
+
+                OMX_CONFIG_ANDROID_VENDOR_EXTENSIONTYPE *ext =
+                    reinterpret_cast<OMX_CONFIG_ANDROID_VENDOR_EXTENSIONTYPE *>(configData);
+                VALIDATE_OMX_VENDOR_EXTENSION_PARAM_DATA(ext);
+
+                return set_vendor_extension_config(ext);
+            }
+
         default:
             DEBUG_PRINT_ERROR("ERROR: unsupported index %d", (int) configIndex);
             break;
@@ -2095,11 +2400,15 @@ OMX_ERRORTYPE  omx_venc::component_deinit(OMX_IN OMX_HANDLETYPE hComp)
         DEBUG_PRINT_ERROR("WARNING:Rxd DeInit,OMX not in LOADED state %d",\
                 m_state);
     }
+
+    auto_lock l(m_buf_lock);
     if (m_out_mem_ptr) {
         DEBUG_PRINT_LOW("Freeing the Output Memory");
         for (i=0; i< m_sOutPortDef.nBufferCountActual; i++ ) {
             if (BITMASK_PRESENT(&m_out_bm_count, i)) {
                 BITMASK_CLEAR(&m_out_bm_count, i);
+                if (BITMASK_PRESENT(&m_client_out_bm_count, i))
+                    BITMASK_CLEAR(&m_client_out_bm_count, i);
                 free_output_buffer (&m_out_mem_ptr[i]);
             }
 
@@ -2142,11 +2451,6 @@ OMX_ERRORTYPE  omx_venc::component_deinit(OMX_IN OMX_HANDLETYPE hComp)
     m_cmd_q.m_read = m_cmd_q.m_write =0;
     m_etb_q.m_read = m_etb_q.m_write =0;
 
-#ifdef _ANDROID_
-    // Clear the strong reference
-    DEBUG_PRINT_HIGH("Calling m_heap_ptr.clear()");
-    m_heap_ptr.clear();
-#endif // _ANDROID_
     DEBUG_PRINT_HIGH("Calling venc_close()");
     if (handle) {
         handle->venc_close();
@@ -2194,9 +2498,34 @@ OMX_U32 omx_venc::dev_set_message_thread_id(pthread_t tid)
     return handle->venc_set_message_thread_id(tid);
 }
 
+OMX_U32 omx_venc::dev_handle_empty_eos_buffer(void)
+{
+    // do nothing in hw component
+    return 1;
+}
+
 bool omx_venc::dev_use_buf(void *buf_addr,unsigned port,unsigned index)
 {
     return handle->venc_use_buf(buf_addr,port,index);
+}
+
+bool omx_venc::dev_buffer_ready_to_queue(OMX_BUFFERHEADERTYPE *buffer)
+{
+    bool bRet = true;
+
+    pthread_mutex_lock(&m_TimeStampInfo.m_lock);
+
+    if ((!m_sParamControlInputQueue.bEnable) ||
+        ((OMX_S64)buffer->nTimeStamp <= (OMX_S64)m_TimeStampInfo.ts)) {
+        DEBUG_PRINT_LOW("ETB is ready to be queued");
+    } else {
+        DEBUG_PRINT_INFO("ETB is deferred due to timeStamp mismatch  buf_ts %lld timestamp.ts %lld",
+                        (OMX_S64)buffer->nTimeStamp, (OMX_S64)m_TimeStampInfo.ts);
+        m_TimeStampInfo.deferred_inbufq.insert_entry((unsigned long)buffer, 0, buffer->nTimeStamp);
+        bRet = false;
+    }
+    pthread_mutex_unlock(&m_TimeStampInfo.m_lock);
+    return bRet;
 }
 
 bool omx_venc::dev_free_buf(void *buf_addr,unsigned port)
@@ -2255,6 +2584,11 @@ bool omx_venc::dev_get_vui_timing_info(OMX_U32 *enabled)
 #endif
 }
 
+bool omx_venc::dev_get_vqzip_sei_info(OMX_U32 *enabled)
+{
+    return handle->venc_get_vqzip_sei_info(enabled);
+}
+
 bool omx_venc::dev_get_peak_bitrate(OMX_U32 *peakbitrate)
 {
 #ifdef _MSM8974_
@@ -2263,6 +2597,25 @@ bool omx_venc::dev_get_peak_bitrate(OMX_U32 *peakbitrate)
     DEBUG_PRINT_ERROR("Get peak bitrate is not supported");
     return false;
 #endif
+}
+
+bool omx_venc::dev_get_batch_size(OMX_U32 *size)
+{
+#ifdef _MSM8974_
+    return handle->venc_get_batch_size(size);
+#else
+    DEBUG_PRINT_ERROR("Get batch size is not supported");
+    return false;
+#endif
+}
+
+bool omx_venc::dev_get_temporal_layer_caps(OMX_U32 *nMaxLayers,
+        OMX_U32 *nMaxBLayers) {
+    return handle->venc_get_temporal_layer_caps(nMaxLayers, nMaxBLayers);
+}
+
+bool omx_venc::dev_get_pq_status(OMX_BOOL *pq_status) {
+    return handle->venc_get_pq_status(pq_status);
 }
 
 bool omx_venc::dev_loaded_start()
@@ -2297,6 +2650,15 @@ bool omx_venc::dev_get_buf_req(OMX_U32 *min_buff_count,
 
 }
 
+bool omx_venc::dev_get_dimensions(OMX_U32 port,
+        OMX_U32 *width,
+        OMX_U32 *height)
+{
+    return handle->venc_get_dimensions(port,
+            width,
+            height);
+}
+
 bool omx_venc::dev_set_buf_req(OMX_U32 *min_buff_count,
         OMX_U32 *actual_buff_count,
         OMX_U32 *buff_size,
@@ -2319,17 +2681,15 @@ bool omx_venc::dev_is_video_session_supported(OMX_U32 width, OMX_U32 height)
 #endif
 }
 
-#ifdef _MSM8974_
-int omx_venc::dev_handle_extradata(void *buffer, int index)
+int omx_venc::dev_handle_output_extradata(void *buffer, int index)
 {
-    return handle->handle_extradata(buffer, index);
+    return handle->handle_output_extradata(buffer, index);
 }
 
 int omx_venc::dev_set_format(int color)
 {
     return handle->venc_set_format(color);
 }
-#endif
 
 int omx_venc::async_message_process (void *context, void* message)
 {
@@ -2351,9 +2711,12 @@ int omx_venc::async_message_process (void *context, void* message)
         DEBUG_PRINT_ERROR("ERROR: async_msg_process() - Error statuscode = %lu",
                 m_sVenc_msg->statuscode);
         if(m_sVenc_msg->msgcode == VEN_MSG_HW_OVERLOAD) {
-            omx->omx_report_hw_overload();
-        } else
-            omx->omx_report_error();
+            omx->post_event (0, m_sVenc_msg->statuscode,\
+                    OMX_COMPONENT_GENERATE_HARDWARE_OVERLOAD);
+        } else {
+            omx->post_event (0, m_sVenc_msg->statuscode,\
+                    OMX_COMPONENT_GENERATE_HARDWARE_ERROR);
+        }
     }
 
     DEBUG_PRINT_LOW("omx_venc::async_message_process- msgcode = %lu",
@@ -2421,7 +2784,8 @@ int omx_venc::async_message_process (void *context, void* message)
                     omxhdr->nFlags = m_sVenc_msg->buf.flags;
 
                     /*Use buffer case*/
-                    if (omx->output_use_buffer && !omx->m_use_output_pmem && !omx->is_secure_session()) {
+                    if (BITMASK_PRESENT(&(omx->m_client_out_bm_count), bufIndex) &&
+                        omx->output_use_buffer && !omx->m_use_output_pmem && !omx->is_secure_session()) {
                         DEBUG_PRINT_LOW("memcpy() for o/p Heap UseBuffer");
                         memcpy(omxhdr->pBuffer,
                                 (m_sVenc_msg->buf.ptrbuffer),
@@ -2493,9 +2857,10 @@ bool omx_venc::dev_get_output_log_flag()
     return handle->venc_get_output_log_flag();
 }
 
-int omx_venc::dev_output_log_buffers(const char *buffer, int bufferlen)
+int omx_venc::dev_output_log_buffers(const char *buffer,
+                  int bufferlen, uint64_t timestamp)
 {
-    return handle->venc_output_log_buffers(buffer, bufferlen);
+    return handle->venc_output_log_buffers(buffer, bufferlen, timestamp);
 }
 
 int omx_venc::dev_extradata_log_buffers(char *buffer)
